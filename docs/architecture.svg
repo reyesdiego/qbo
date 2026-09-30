@@ -1,0 +1,235 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1100" viewBox="0 0 1600 1100" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#334155"/>
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2563eb"/>
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#059669"/>
+    </marker>
+    <style>
+      .box { stroke-width: 2; rx: 14; }
+      .title { font-size: 17px; font-weight: 700; fill: #0f172a; }
+      .sub { font-size: 12.5px; fill: #475569; }
+      .txt { font-size: 13.5px; fill: #1e293b; }
+      .code { font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 12.5px; fill: #0f172a; }
+      .small { font-size: 12px; fill: #334155; }
+      .num { font-size: 14px; font-weight: 700; fill: #ffffff; }
+      .label { font-size: 12.5px; font-weight: 600; }
+      .h { font-size: 13px; font-weight: 700; fill: #0f172a; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="1100" fill="#f8fafc"/>
+
+  <!-- Title -->
+  <text x="40" y="48" font-size="26" font-weight="800" fill="#0f172a">Invoices API ⇄ QuickBooks Online</text>
+  <text x="40" y="74" font-size="15" fill="#475569">Two-way sync with PostgreSQL as the queue (transactional outbox) · Node.js · TypeScript · Express 5 · Slonik · zod · no message broker</text>
+
+  <!-- ===================== Clients ===================== -->
+  <rect class="box" x="40" y="110" width="270" height="130" fill="#ffffff" stroke="#94a3b8"/>
+  <text class="title" x="60" y="142">Clients</text>
+  <text class="txt" x="60" y="168">curl · client.http (GoLand)</text>
+  <text class="txt" x="60" y="190">apps using the REST API</text>
+  <text class="sub" x="60" y="218">Idempotency-Key required on POST</text>
+
+  <!-- ===================== API ===================== -->
+  <rect class="box" x="400" y="100" width="570" height="282" fill="#eff6ff" stroke="#2563eb"/>
+  <text class="title" x="422" y="132">API — Express 5  (src/server.ts)</text>
+  <text class="sub" x="422" y="152">Validates with zod · never calls QuickBooks while handling invoices, payments or webhooks</text>
+  <text class="code" x="422" y="182">POST · PATCH · DELETE  /invoices   (POST: Idempotency-Key)</text>
+  <text class="code" x="422" y="204">POST · DELETE  /invoices/:id/payments   (POST: Idempotency-Key)</text>
+  <text class="code" x="422" y="226">GET  /accounts   /sync/jobs   /sync/stats   /sync/events</text>
+  <text class="code" x="422" y="248">POST /sync/jobs/:id/retry   /sync/conflicts/:id/resolve</text>
+  <text class="code" x="422" y="270">POST /sync/consistency-check   (all ids vs QuickBooks)</text>
+  <text class="code" x="422" y="292">GET  /quickbooks/connect → /callback   (OAuth 2.0)</text>
+  <text class="code" x="422" y="314">POST /quickbooks/webhooks   (HMAC-SHA256 verified)</text>
+  <rect x="422" y="330" width="526" height="36" rx="8" fill="#dbeafe"/>
+  <text class="small" x="436" y="353"><tspan font-weight="700">One transaction:</tspan> the change + its sync job + NOTIFY  →  respond without waiting</text>
+
+  <!-- ===================== QuickBooks ===================== -->
+  <rect class="box" x="1180" y="100" width="380" height="330" fill="#ecfdf5" stroke="#059669"/>
+  <text class="title" x="1200" y="132">QuickBooks Online (Intuit)</text>
+  <text class="sub" x="1200" y="152">Sandbox company · system of record for payments</text>
+  <text class="h" x="1200" y="184">OAuth 2.0</text>
+  <text class="small" x="1200" y="203">tokens in Postgres, refresh with compare-and-set</text>
+  <text class="h" x="1200" y="232">Accounting API</text>
+  <text class="small" x="1200" y="251">Invoice · Payment · Customer · Item · Account</text>
+  <text class="small" x="1200" y="269">sparse updates with SyncToken · throttled 150 ms</text>
+  <text class="h" x="1200" y="298">Webhooks</text>
+  <text class="small" x="1200" y="317">Invoice · Payment · Account (legacy or CloudEvents)</text>
+  <text class="small" x="1200" y="335">dev: through a Cloudflare tunnel</text>
+  <text class="h" x="1200" y="364">Change Data Capture (CDC)</text>
+  <text class="small" x="1200" y="383">what changed since the cursor (≤ 30 days)</text>
+  <text class="small" x="1200" y="401">+ paginated queries for the full import</text>
+
+  <!-- ===================== PostgreSQL ===================== -->
+  <rect class="box" x="400" y="440" width="570" height="300" fill="#fefce8" stroke="#ca8a04"/>
+  <text class="title" x="422" y="472">PostgreSQL  (Docker · migrations with node-pg-migrate)</text>
+  <text class="h" x="422" y="504">Business data</text>
+  <text class="code" x="422" y="526">invoices</text>
+  <text class="small" x="422" y="545">NUMERIC money, version, synced snapshot,</text>
+  <text class="small" x="422" y="562">sync_status, conflict, quickbooks id + realm</text>
+  <text class="code" x="422" y="590">invoice_payments</text>
+  <text class="small" x="422" y="609">recorded here + mirrored from QuickBooks</text>
+  <text class="code" x="422" y="637">quickbooks_accounts</text>
+  <text class="small" x="422" y="656">local copy of the chart of accounts</text>
+
+  <text class="h" x="700" y="504">Synchronization</text>
+  <text class="code" x="700" y="526">sync_jobs  — the queue</text>
+  <text class="small" x="700" y="545">claim token, lease, attempts, next_run_at</text>
+  <text class="small" x="700" y="562">entity_key: one job per invoice at a time</text>
+  <text class="code" x="700" y="590">sync_events</text>
+  <text class="small" x="700" y="609">webhook / reconciliation log, event_key unique</text>
+  <text class="code" x="700" y="637">quickbooks_connection</text>
+  <text class="small" x="700" y="656">tokens, CDC cursor</text>
+
+  <rect x="422" y="676" width="526" height="48" rx="8" fill="#fef3c7"/>
+  <text class="small" x="436" y="696"><tspan font-weight="700">Job states:</tspan>  PENDING → PROCESSING → COMPLETED  ·  FAILED (retry via API)</text>
+  <text class="small" x="436" y="715">UNKNOWN = create sent, response lost → reconciled, never resent blindly</text>
+
+  <!-- ===================== Worker ===================== -->
+  <rect class="box" x="400" y="820" width="570" height="262" fill="#f5f3ff" stroke="#7c3aed"/>
+  <text class="title" x="422" y="852">Worker(s)  (src/worker.ts · run 1..N)</text>
+  <text class="small" x="422" y="876"><tspan font-weight="700">Wake:</tspan> LISTEN sync_jobs (ms) · poll every 5 s: a missed NOTIFY loses no job</text>
+  <text class="small" x="422" y="898"><tspan font-weight="700">Claim:</tspan> FOR UPDATE SKIP LOCKED + claim token + lease · no transaction during HTTP</text>
+  <text class="small" x="422" y="924"><tspan font-weight="700">Outbound:</tspan> invoices create · update · sent · paid · void · delete</text>
+  <text class="small" x="438" y="942">payments create · delete (load the latest local state)</text>
+  <text class="small" x="422" y="968"><tspan font-weight="700">Inbound:</tspan> fetch the current entity · SyncToken ordering · 3-way conflict check</text>
+  <text class="small" x="438" y="986">balance / paid / sent / void · deletions · payments · accounts</text>
+  <text class="small" x="422" y="1012"><tspan font-weight="700">Reconcile</tspan> (every N min): CDC catch-up · full import if empty, &gt; 30 days or capped</text>
+  <text class="small" x="438" y="1030">UNKNOWN creates searched by reference · expired leases recovered</text>
+  <text class="small" x="422" y="1056"><tspan font-weight="700">Consistency</tspan> (every 24 h + on demand): all ids vs QuickBooks · re-import missing</text>
+  <text class="small" x="438" y="1074">rows (e.g. deleted by hand) · delete only if a GET confirms</text>
+
+  <!-- ===================== Arrows ===================== -->
+  <!-- 1 clients -> API -->
+  <line x1="310" y1="175" x2="396" y2="175" stroke="#334155" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <circle cx="352" cy="158" r="12" fill="#334155"/><text class="num" x="352" y="163" text-anchor="middle">1</text>
+
+  <!-- 2 API -> Postgres -->
+  <line x1="600" y1="382" x2="600" y2="436" stroke="#2563eb" stroke-width="2.5" marker-end="url(#arrow-blue)"/>
+  <circle cx="582" cy="409" r="12" fill="#2563eb"/><text class="num" x="582" y="414" text-anchor="middle">2</text>
+  <text class="label" x="614" y="405" fill="#2563eb">change + job + NOTIFY</text>
+  <text class="label" x="614" y="422" fill="#2563eb">(atomic, outbox)</text>
+
+  <!-- 3 Postgres -> Worker -->
+  <line x1="600" y1="740" x2="600" y2="816" stroke="#7c3aed" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <circle cx="582" cy="778" r="12" fill="#7c3aed"/><text class="num" x="582" y="783" text-anchor="middle">3</text>
+  <text class="label" x="614" y="767" fill="#7c3aed">NOTIFY wakes · or 5 s poll</text>
+  <text class="label" x="614" y="784" fill="#7c3aed">claim job</text>
+  <text class="label" x="614" y="801" fill="#7c3aed">save result + complete job</text>
+  <line x1="820" y1="816" x2="820" y2="744" stroke="#7c3aed" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#arrow)"/>
+
+  <!-- 4 Worker -> QuickBooks (push) -->
+  <path d="M970,880 L1090,880 L1090,300 L1176,300" fill="none" stroke="#059669" stroke-width="2.5" marker-end="url(#arrow-green)"/>
+  <circle cx="1090" cy="560" r="12" fill="#059669"/><text class="num" x="1090" y="565" text-anchor="middle">4</text>
+  <text class="label" x="980" y="870" fill="#059669">push (requestid)</text>
+
+  <!-- 6 QuickBooks -> Worker (fetch / CDC) -->
+  <path d="M1176,400 L1130,400 L1130,990 L974,990" fill="none" stroke="#059669" stroke-width="2.5" stroke-dasharray="7 4" marker-end="url(#arrow-green)"/>
+  <circle cx="1130" cy="700" r="12" fill="#059669"/><text class="num" x="1130" y="705" text-anchor="middle">6</text>
+  <text class="label" x="992" y="980" fill="#059669">fetch current · CDC</text>
+
+  <!-- 5 QuickBooks -> API (webhooks) -->
+  <line x1="1180" y1="170" x2="974" y2="170" stroke="#059669" stroke-width="2.5" marker-end="url(#arrow-green)"/>
+  <circle cx="1077" cy="152" r="12" fill="#059669"/><text class="num" x="1077" y="157" text-anchor="middle">5</text>
+  <text class="label" x="1000" y="192" fill="#059669">webhooks</text>
+
+  <!-- OAuth -->
+  <line x1="974" y1="240" x2="1176" y2="240" stroke="#64748b" stroke-width="1.8" stroke-dasharray="5 4" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+  <text class="label" x="1000" y="232" fill="#64748b">OAuth connect</text>
+
+  <!-- ===================== Flows (left) ===================== -->
+  <rect class="box" x="40" y="280" width="320" height="802" fill="#ffffff" stroke="#94a3b8"/>
+  <text class="title" x="60" y="312">How a change travels</text>
+
+  <circle cx="68" cy="344" r="11" fill="#334155"/><text class="num" x="68" y="349" text-anchor="middle">1</text>
+  <text class="small" x="88" y="340">A client creates or changes an</text>
+  <text class="small" x="88" y="357">invoice or payment (REST).</text>
+
+  <circle cx="68" cy="394" r="11" fill="#2563eb"/><text class="num" x="68" y="399" text-anchor="middle">2</text>
+  <text class="small" x="88" y="390">The API saves the change and its</text>
+  <text class="small" x="88" y="407">sync job in ONE transaction, sends</text>
+  <text class="small" x="88" y="424">NOTIFY (delivered on commit) and</text>
+  <text class="small" x="88" y="441">answers without waiting.</text>
+
+  <circle cx="68" cy="478" r="11" fill="#7c3aed"/><text class="num" x="68" y="483" text-anchor="middle">3</text>
+  <text class="small" x="88" y="474">On NOTIFY (ms) or its 5 s poll, a</text>
+  <text class="small" x="88" y="491">worker claims the job (SKIP LOCKED,</text>
+  <text class="small" x="88" y="508">claim token, lease). Jobs of one</text>
+  <text class="small" x="88" y="525">invoice run one at a time, in order.</text>
+
+  <circle cx="68" cy="562" r="11" fill="#059669"/><text class="num" x="68" y="567" text-anchor="middle">4</text>
+  <text class="small" x="88" y="558">It pushes to QuickBooks: create with</text>
+  <text class="small" x="88" y="575">requestid + reference, sparse update</text>
+  <text class="small" x="88" y="592">with SyncToken, void/delete, payments.</text>
+  <text class="small" x="88" y="609">Result + job completion: one short</text>
+  <text class="small" x="88" y="626">transaction (claim token checked).</text>
+
+  <circle cx="68" cy="663" r="11" fill="#059669"/><text class="num" x="68" y="668" text-anchor="middle">5</text>
+  <text class="small" x="88" y="659">A change in QuickBooks arrives as a</text>
+  <text class="small" x="88" y="676">signed webhook: the API verifies it,</text>
+  <text class="small" x="88" y="693">stores sync_event + job, and answers</text>
+  <text class="small" x="88" y="710">200 only after the commit.</text>
+
+  <circle cx="68" cy="747" r="11" fill="#059669"/><text class="num" x="68" y="752" text-anchor="middle">6</text>
+  <text class="small" x="88" y="743">The worker fetches the current entity</text>
+  <text class="small" x="88" y="760">and applies it: older/duplicate</text>
+  <text class="small" x="88" y="777">versions skipped, conflicts flagged,</text>
+  <text class="small" x="88" y="794">balance · paid · sent · void updated.</text>
+  <text class="small" x="88" y="811">Reconciliation (CDC) catches any</text>
+  <text class="small" x="88" y="828">webhook that was missed.</text>
+
+  <line x1="60" y1="852" x2="340" y2="852" stroke="#e2e8f0" stroke-width="1.5"/>
+  <text class="h" x="60" y="878">Tests</text>
+  <text class="small" x="60" y="898">161 tests on a separate invoices_test</text>
+  <text class="small" x="60" y="915">DB, with an in-memory fake QuickBooks</text>
+  <text class="small" x="60" y="932">and fault injection (lost responses,</text>
+  <text class="small" x="60" y="949">timeouts, stale versions)</text>
+  <text class="small" x="60" y="974">+ race tests: a local change made</text>
+  <text class="small" x="60" y="991">while a job runs or waits</text>
+  <text class="small" x="60" y="1016">+ integration tests against the real</text>
+  <text class="small" x="60" y="1033">QuickBooks sandbox, incl. 5 of the races</text>
+
+  <!-- ===================== Guarantees (right) ===================== -->
+  <rect class="box" x="1180" y="470" width="380" height="612" fill="#ffffff" stroke="#94a3b8"/>
+  <text class="title" x="1200" y="502">Guarantees</text>
+
+  <text class="h" x="1200" y="534">Nothing lost</text>
+  <text class="small" x="1200" y="552">• change + job commit together (outbox)</text>
+  <text class="small" x="1200" y="569">• webhook answered 200 only after saving</text>
+  <text class="small" x="1200" y="586">• dead worker: lease expires, job recovered</text>
+  <text class="small" x="1200" y="603">• missed NOTIFY: the next 5 s poll finds the job</text>
+
+  <text class="h" x="1200" y="627">Nothing duplicated</text>
+  <text class="small" x="1200" y="645">• Idempotency-Key required on POST (else 400)</text>
+  <text class="small" x="1200" y="662">• requestid + reference in PrivateNote</text>
+  <text class="small" x="1200" y="679">• lost response → UNKNOWN → reconciliation</text>
+  <text class="small" x="1200" y="696">• webhook redelivery: event_key unique</text>
+  <text class="small" x="1200" y="713">• only a "paid" set here records a payment</text>
+
+  <text class="h" x="1200" y="737">Nothing overwritten silently</text>
+  <text class="small" x="1200" y="755">• claim token: a stale worker can't finish a job</text>
+  <text class="small" x="1200" y="772">• SyncToken only from our own writes: no loops</text>
+  <text class="small" x="1200" y="789">• 3-way check → conflict, resolved via the API</text>
+  <text class="small" x="1200" y="806">• taxed in QuickBooks: content edited there only</text>
+  <text class="small" x="1200" y="823">• changed mid-sync: still pushed (paid, void, delete)</text>
+
+  <text class="h" x="1200" y="847">Failures handled</text>
+  <text class="small" x="1200" y="865">• retries with exponential backoff + jitter</text>
+  <text class="small" x="1200" y="882">• 429 · 5xx · timeouts · stale version classified</text>
+  <text class="small" x="1200" y="899">• FAILED / UNKNOWN jobs: inspect and retry</text>
+  <text class="small" x="1216" y="916">GET /sync/jobs · POST /sync/jobs/:id/retry</text>
+  <text class="small" x="1200" y="933">• authorization expired: jobs wait for reconnect</text>
+
+  <text class="h" x="1200" y="957">Observability</text>
+  <text class="small" x="1200" y="975">• /sync/stats: pending, failed, unknown,</text>
+  <text class="small" x="1216" y="992">oldest pending, avg processing time</text>
+  <text class="small" x="1200" y="1009">• JSON logs with job, event, entity, realm,</text>
+  <text class="small" x="1216" y="1026">attempt, duration, error class</text>
+  <text class="small" x="1200" y="1045">• consistency check: repairs rows changed outside</text>
+  <text class="small" x="1216" y="1060">the app (e.g. deleted by hand)</text>
+</svg>

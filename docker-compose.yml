@@ -1,0 +1,17 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: invoices
+    ports:
+      - "5433:5432"
+    volumes:
+      # On first start (empty data volume) Postgres runs create-test-db.sh, which creates the
+      # test database. Tables are created by the migrations (npm run db:migrate).
+      - ./db:/docker-entrypoint-initdb.d:ro
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:

@@ -1,0 +1,48 @@
+{
+  "name": "qbo",
+  "version": "1.0.0",
+  "main": "dist/src/server.js",
+  "scripts": {
+    "db:up": "docker compose up -d",
+    "db:down": "docker compose down",
+    "db:migrate": "node-pg-migrate up --envPath .env",
+    "db:migrate:down": "node-pg-migrate down --envPath .env",
+    "db:migrate:create": "node-pg-migrate create --migration-file-language sql",
+    "db:test:reset": "docker compose exec -T postgres sh /docker-entrypoint-initdb.d/create-test-db.sh && npm run db:test:migrate",
+    "db:test:migrate": "node-pg-migrate up --envPath .env.test",
+    "dev": "tsx watch --env-file-if-exists=.env src/server.ts",
+    "dev:worker": "tsx watch --env-file-if-exists=.env src/worker.ts",
+    "build": "tsc",
+    "start": "node --env-file-if-exists=.env dist/src/server.js",
+    "worker": "node --env-file-if-exists=.env dist/src/worker.js",
+    "typecheck": "tsc --noEmit",
+    "pretest": "npm run db:test:migrate --silent",
+    "test": "tsx --env-file=.env.test --import ./test/setup.ts --test test/*.test.ts",
+    "test:sandbox": "LOG_LEVEL=silent tsx --env-file=.env --import ./test/sandbox/setup.ts --test test/sandbox/*.test.ts",
+    "docs:pdf": "docs/build-pdf.sh",
+    "docs:diagram": "node docs/system-design/generate.mjs"
+  },
+  "author": "Diego Reyes",
+  "license": "ISC",
+  "description": "Basic invoices CRUD API (Express + Slonik + Postgres, TypeScript)",
+  "dependencies": {
+    "express": "^5.2.1",
+    "intuit-oauth": "^4.2.5",
+    "pg": "^8.23.0",
+    "slonik": "^47.3.2",
+    "zod": "^3.25.76"
+  },
+  "engines": {
+    "node": ">=22.12"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.20.4",
+    "@types/pg": "^8.23.1",
+    "dotenv": "^18.0.4",
+    "node-pg-migrate": "^9.0.0",
+    "roughjs": "^4.6.6",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3"
+  }
+}

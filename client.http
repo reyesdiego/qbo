@@ -1,0 +1,526 @@
+# Requests for the Invoices API, for the JetBrains HTTP Client (built into GoLand, IntelliJ,
+# WebStorm): click the ▶ next to a request to send it.
+#
+# Values are passed between requests with `client.global.set(...)` in the response handlers
+# (`> {% ... %}`) and used as {{variables}}; `client.test(...)` asserts on the response.
+#
+# Before syncing to QuickBooks, connect once in a browser:
+#   http://localhost:3000/quickbooks/connect
+# The connection is saved in Postgres, and the sync worker must be running (npm run dev:worker).
+
+@baseUrl = http://localhost:3000
+
+### Health check
+GET {{baseUrl}}/health
+
+###############################################################################
+# Create a local invoice; the sync worker (`npm run dev:worker`) sends it to QuickBooks
+###############################################################################
+
+### 1. Create an invoice in the local Postgres database (sync_status: "pending")
+# {{$random.uuid}} makes a new Idempotency-Key on every send (a new invoice each time). A real
+# client keeps the same key when retrying a request that timed out; see the duplicate test below.
+POST {{baseUrl}}/invoices
+Content-Type: application/json
+Idempotency-Key: {{$random.uuid}}
+
+{
+  "customer_name": "Acme Corp Diego",
+  "amount": "300.00",
+  "currency": "USD",
+  "due_date": "2026-10-05"
+}
+
+> {%
+  client.global.set("invoiceId", response.body.id);
+%}
+
+### 2. A few seconds later: sync_status is "synced" and quickbooks_id is set
+# (if it failed, sync_error says why)
+GET {{baseUrl}}/invoices/{{invoiceId}}
+
+### 3. Check it in QuickBooks
+GET {{baseUrl}}/quickbooks/invoices?limit=5
+
+###############################################################################
+# Local invoices
+###############################################################################
+
+### List local invoices (optional: status, limit, offset)
+GET {{baseUrl}}/invoices?limit=20&offset=0
+
+### List only paid invoices
+GET {{baseUrl}}/invoices?status=paid
+
+### Update the invoice created in 1 (only the fields sent are changed; queued to sync again)
+PATCH {{baseUrl}}/invoices/{{invoiceId}}
+Content-Type: application/json
+
+{
+  "status": "sent"
+}
+
+### Update the invoice created in 1 (only the fields sent are changed; queued to sync again)
+PATCH {{baseUrl}}/invoices/105
+Content-Type: application/json
+
+{
+  "due_date": "2026-10-05"
+}
+
+### Delete the invoice created in 1 (also deleted in QuickBooks by the worker)
+DELETE {{baseUrl}}/invoices/{{invoiceId}}
+
+### Chart of accounts: local copy, kept in sync by webhooks and the worker
+GET {{baseUrl}}/accounts
+
+### Validation error example (400)
+POST {{baseUrl}}/invoices
+Content-Type: application/json
+Idempotency-Key: {{$random.uuid}}
+
+{
+  "customer_name": "",
+  "amount": "-0.05"
+}
+
+###############################################################################
+# Duplicate invoice test: send D1 to D7 in order. Each one checks its response
+# (see the "Tests" tab of the result): a retry with the same Idempotency-Key must
+# not create a second invoice, and POST /invoices without a key is rejected (400).
+###############################################################################
+
+### D1. Create an invoice with a new Idempotency-Key -> 201 Created
+< {%
+  // New key for this run of the test; D2 sends it again
+  client.global.set("dupKey", "dup-test-" + Date.now());
+%}
+POST {{baseUrl}}/invoices
+Content-Type: application/json
+Idempotency-Key: {{dupKey}}
+
+{
+  "customer_name": "Retry Co",
+  "amount": "50.00",
+  "due_date": "2026-12-31"
+}
+
+> {%
+  client.test("D1: invoice created", function () {
+    client.assert(response.status === 201, "expected 201, got " + response.status);
+  });
+  client.global.set("dupFirstId", response.body.id);
+%}
+
+### D2. Retry with the SAME key, like a client after a timeout -> 200 with the same invoice
+POST {{baseUrl}}/invoices
+Content-Type: application/json
+Idempotency-Key: {{dupKey}}
+
+{
+  "customer_name": "Retry Co",
+  "amount": "50.00",
+  "due_date": "2026-12-31"
+}
+
+> {%
+  client.test("D2: retry returns the original invoice, nothing created", function () {
+    client.assert(response.status === 200, "expected 200, got " + response.status);
+    client.assert(
+      String(response.body.id) === String(client.global.get("dupFirstId")),
+      "expected id " + client.global.get("dupFirstId") + ", got " + response.body.id
+    );
+  });
+%}
+
+### D3. Same body WITHOUT a key -> 400: the key is required, so a retry can't create a duplicate
+POST {{baseUrl}}/invoices
+Content-Type: application/json
+
+{
+  "customer_name": "Retry Co",
+  "amount": "50.00",
+  "due_date": "2026-12-31"
+}
+
+> {%
+  client.test("D3: without a key nothing is created", function () {
+    client.assert(response.status === 400, "expected 400, got " + response.status);
+  });
+%}
+
+### D4. Same body with a NEW key -> 201 with a new id: a client that makes a new key when
+# retrying defeats the protection. D5 catches that kind of duplicate.
+POST {{baseUrl}}/invoices
+Content-Type: application/json
+Idempotency-Key: {{$random.uuid}}
+
+{
+  "customer_name": "Retry Co",
+  "amount": "50.00",
+  "due_date": "2026-12-31"
+}
+
+> {%
+  client.test("D4: a new key creates a second invoice", function () {
+    client.assert(response.status === 201, "expected 201, got " + response.status);
+    client.assert(String(response.body.id) !== String(client.global.get("dupFirstId")), "expected a new id");
+  });
+  client.global.set("dupNewKeyId", response.body.id);
+%}
+
+### D5. Duplicate check -> "local" lists Retry Co with the ids from D1 and D4
+# (needs the QuickBooks connection, since it also checks QuickBooks)
+GET {{baseUrl}}/quickbooks/duplicates
+
+> {%
+  client.test("D5: the D1 and D4 invoices are reported as likely duplicates", function () {
+    client.assert(response.status === 200, "expected 200, got " + response.status);
+    var first = Number(client.global.get("dupFirstId"));
+    var second = Number(client.global.get("dupNewKeyId"));
+    var found = response.body.local.some(function (group) {
+      return group.invoice_ids.indexOf(first) !== -1 && group.invoice_ids.indexOf(second) !== -1;
+    });
+    client.assert(found, "expected a group with invoices " + first + " and " + second);
+  });
+  client.test("D5: no duplicates in QuickBooks", function () {
+    client.assert(response.body.quickbooks.length === 0, "found " + response.body.quickbooks.length);
+  });
+%}
+
+### D6. Clean up the D1/D2 invoice (the worker deletes it in QuickBooks too, if already synced)
+DELETE {{baseUrl}}/invoices/{{dupFirstId}}
+
+> {%
+  client.test("D6: deleted", function () {
+    client.assert(response.status === 204, "expected 204, got " + response.status);
+  });
+%}
+
+### D7. Clean up the D4 invoice
+DELETE {{baseUrl}}/invoices/{{dupNewKeyId}}
+
+> {%
+  client.test("D7: deleted", function () {
+    client.assert(response.status === 204, "expected 204, got " + response.status);
+  });
+%}
+
+###############################################################################
+# Payments: send P1 to P13 in order. Payments recorded here are pushed to
+# QuickBooks by the worker; the "A few seconds later" steps check its result.
+# Payments made in QuickBooks show up in the same list (P5, P8).
+###############################################################################
+
+### P1. An invoice of 100.00 to pay
+POST {{baseUrl}}/invoices
+Content-Type: application/json
+Idempotency-Key: {{$random.uuid}}
+
+{
+  "customer_name": "Payments Demo",
+  "amount": "100.00",
+  "due_date": "2026-12-31",
+  "status": "sent"
+}
+
+> {%
+  client.test("P1: invoice created", function () {
+    client.assert(response.status === 201, "expected 201, got " + response.status);
+  });
+  client.global.set("payInvoiceId", response.body.id);
+%}
+
+### P2. Partial payment of 30.00 -> 201, sync_status "pending" until the worker records it in QuickBooks
+< {%
+  // New key for this run; P3 sends it again
+  client.global.set("paymentKey", "pay-test-" + Date.now());
+%}
+POST {{baseUrl}}/invoices/{{payInvoiceId}}/payments
+#POST {{baseUrl}}/invoices/123/payments
+Content-Type: application/json
+Idempotency-Key: {{paymentKey}}
+
+{
+  "amount": "18.00"
+}
+
+> {%
+  client.test("P2: payment recorded", function () {
+    client.assert(response.status === 201, "expected 201, got " + response.status);
+    client.assert(response.body.amount === "30.00", "amount " + response.body.amount);
+  });
+  client.global.set("firstPaymentId", response.body.id);
+%}
+
+### P3. Retry with the same Idempotency-Key -> 200 with the same payment, nothing paid twice
+POST {{baseUrl}}/invoices/{{payInvoiceId}}/payments
+#POST {{baseUrl}}/invoices/123/payments
+Content-Type: application/json
+Idempotency-Key: {{paymentKey}}
+
+{
+  "amount": "30.00"
+}
+
+> {%
+  client.test("P3: same payment returned", function () {
+    client.assert(response.status === 200, "expected 200, got " + response.status);
+    client.assert(String(response.body.id) === String(client.global.get("firstPaymentId")), "a different payment was created");
+  });
+%}
+
+### P4. More than what is left to pay (100 - 30 = 70) -> 422
+POST {{baseUrl}}/invoices/{{payInvoiceId}}/payments
+Content-Type: application/json
+Idempotency-Key: {{$random.uuid}}
+
+{
+  "amount": "80.00"
+}
+
+> {%
+  client.test("P4: over-payment rejected", function () {
+    client.assert(response.status === 422, "expected 422, got " + response.status);
+  });
+%}
+
+### P5. A few seconds later: the payment is in QuickBooks (synced, quickbooks_id set)
+GET {{baseUrl}}/invoices/{{payInvoiceId}}/payments
+
+> {%
+  client.test("P5: payment synced to QuickBooks", function () {
+    var payment = response.body.filter(function (p) { return String(p.id) === String(client.global.get("firstPaymentId")); })[0];
+    client.assert(payment, "payment not listed");
+    client.assert(payment.sync_status === "synced" && payment.quickbooks_id, "still " + payment.sync_status + ": send again in a moment");
+  });
+%}
+
+### P6. The invoice's balance, from QuickBooks -> 70.00
+GET {{baseUrl}}/invoices/{{payInvoiceId}}
+
+> {%
+  client.test("P6: balance 70.00", function () {
+    client.assert(response.body.balance === "70.00", "balance " + response.body.balance);
+  });
+%}
+
+### P7. Mark as paid: the worker pays the rest (70.00) in QuickBooks
+PATCH {{baseUrl}}/invoices/{{payInvoiceId}}
+Content-Type: application/json
+
+{
+  "status": "paid"
+}
+
+> {%
+  client.test("P7: marked as paid", function () {
+    client.assert(response.status === 200, "expected 200, got " + response.status);
+  });
+%}
+
+### P8. A few seconds later: two payments (30.00 + 70.00), both synced
+GET {{baseUrl}}/invoices/{{payInvoiceId}}/payments
+
+> {%
+  client.test("P8: both payments listed and synced", function () {
+    client.assert(response.body.length === 2, "expected 2 payments, got " + response.body.length + ": send again in a moment");
+    response.body.forEach(function (p) {
+      client.assert(p.sync_status === "synced", "payment " + p.id + " is " + p.sync_status);
+    });
+  });
+  var rest = response.body.filter(function (p) { return String(p.id) !== String(client.global.get("firstPaymentId")); })[0];
+  if (rest) client.global.set("secondPaymentId", rest.id);
+%}
+
+### P9. The invoice is paid in full -> status "paid", balance 0.00
+GET {{baseUrl}}/invoices/{{payInvoiceId}}
+
+> {%
+  client.test("P9: paid in full", function () {
+    client.assert(response.body.status === "paid" && response.body.balance === "0.00", response.body.status + " " + response.body.balance);
+  });
+%}
+
+### P10. Un-paying by changing the status is rejected -> 409 (delete a payment instead)
+PATCH {{baseUrl}}/invoices/{{payInvoiceId}}
+Content-Type: application/json
+
+{
+  "status": "sent"
+}
+
+> {%
+  client.test("P10: rejected", function () {
+    client.assert(response.status === 409, "expected 409, got " + response.status);
+  });
+%}
+
+### P11. Delete the 30.00 payment -> 204 (the worker deletes it in QuickBooks)
+DELETE {{baseUrl}}/invoices/{{payInvoiceId}}/payments/{{firstPaymentId}}
+
+> {%
+  client.test("P11: payment deleted", function () {
+    client.assert(response.status === 204, "expected 204, got " + response.status);
+  });
+%}
+
+### P12. A few seconds later: balance back to 30.00, status "sent"
+GET {{baseUrl}}/invoices/{{payInvoiceId}}
+
+> {%
+  client.test("P12: balance restored", function () {
+    client.assert(response.body.balance === "30.00" && response.body.status === "sent", response.body.status + " " + response.body.balance + ": send again in a moment");
+  });
+%}
+
+### P13. Clean up: delete the other payment, then the invoice (both also deleted in QuickBooks)
+DELETE {{baseUrl}}/invoices/{{payInvoiceId}}/payments/{{secondPaymentId}}
+
+###
+DELETE {{baseUrl}}/invoices/{{payInvoiceId}}
+
+###############################################################################
+# Simulate a QuickBooks webhook (no tunnel needed): tells the API that something
+# changed in QuickBooks, signed like Intuit does. E.g. edit an invoice in QuickBooks,
+# put its Id below and send W1 then W2: the local invoice updates right away.
+#
+# Run with the "dev" environment (environment selector next to ▶): the verifier token
+# comes from http-client.private.env.json (gitignored) and must match
+# QBO_WEBHOOK_VERIFIER_TOKEN in .env.
+###############################################################################
+
+### W1. Connected company (the webhook ignores events for other companies)
+GET {{baseUrl}}/quickbooks/status
+
+> {%
+  client.test("W1: connected to QuickBooks", function () {
+    client.assert(response.body.connected === true, "not connected: visit /quickbooks/connect");
+  });
+  client.global.set("realmId", response.body.realm_id);
+%}
+
+### W2. Webhook: an entity changed in QuickBooks -> 200, then the API fetches and applies it
+< {%
+  // What changed: "Invoice", "Payment" or "Account", its QuickBooks Id, and "Update", "Create" or "Delete"
+  var entity = { name: "Invoice", id: "130", operation: "Update" };
+
+  var body = JSON.stringify({
+    eventNotifications: [{
+      realmId: client.global.get("realmId"),
+      dataChangeEvent: { entities: [{ name: entity.name, id: entity.id, operation: entity.operation, lastUpdated: new Date().toISOString() }] }
+    }]
+  });
+  // Same signature as Intuit: base64(HMAC-SHA256(body, verifier token))
+  var signature = crypto.hmac.sha256()
+    .withTextSecret(request.environment.get("webhookVerifierToken"))
+    .updateWithText(body)
+    .digest().toBase64();
+
+  request.variables.set("webhookBody", body);
+  request.variables.set("webhookSignature", signature);
+%}
+POST {{baseUrl}}/quickbooks/webhooks
+Content-Type: application/json
+intuit-signature: {{webhookSignature}}
+
+{{webhookBody}}
+
+> {%
+  client.test("W2: webhook accepted", function () {
+    client.assert(response.status === 200, "expected 200, got " + response.status + " (503: set QBO_WEBHOOK_VERIFIER_TOKEN; 401: tokens don't match)");
+  });
+%}
+
+###############################################################################
+# Sync operations: the job queue, notifications received, metrics, conflicts
+###############################################################################
+
+### Sync metrics: pending / failed / unknown jobs, retries, oldest pending job, avg processing time
+GET {{baseUrl}}/sync/stats
+
+### Failed jobs (also: PENDING, PROCESSING, COMPLETED, UNKNOWN)
+# Each job shows its invoice as local_invoice_id and quickbooks_id. Careful: entity_id is the local id
+# for OUTBOUND jobs, but the QuickBooks id for INBOUND ones.
+GET {{baseUrl}}/sync/jobs?status=FAILED&limit=20
+
+### Creates whose result is unknown, waiting for reconciliation
+GET {{baseUrl}}/sync/jobs?status=UNKNOWN
+
+### Sync history of the invoice created in 1, both directions (see the log below the response)
+GET {{baseUrl}}/sync/jobs?invoice_id={{invoiceId}}
+
+> {%
+  var invoiceId = Number(client.global.get("invoiceId"));
+  var jobs = response.body;
+  jobs.forEach(function (job) {
+    client.log(job.created_at + "  " + job.direction + " " + job.operation + " -> " + job.status +
+      "  local_invoice_id=" + job.local_invoice_id + " quickbooks_id=" + job.quickbooks_id +
+      " entity_id=" + job.entity_id + "  " + (job.payload.result || job.last_error || ""));
+  });
+  client.test("the invoice's jobs carry both ids", function () {
+    client.assert(jobs.length > 0, "no jobs found for invoice " + invoiceId + " (run request 1 first)");
+    jobs.forEach(function (job) {
+      var expected = job.direction === "OUTBOUND" ? String(job.local_invoice_id) : job.quickbooks_id;
+      client.assert(job.entity_id === expected, "entity_id " + job.entity_id + " doesn't match its direction");
+    });
+  });
+%}
+
+### Notifications received from QuickBooks (webhooks and reconciliation)
+GET {{baseUrl}}/sync/events?limit=20
+
+### Retry a FAILED or UNKNOWN job (put its id from the list above)
+POST {{baseUrl}}/sync/jobs/00000000-0000-0000-0000-000000000000/retry
+
+### Consistency check, report only: every QuickBooks invoice vs the local ones, nothing changed
+POST {{baseUrl}}/sync/consistency-check?repair=false
+
+> {%
+  client.test("consistency report received", function () {
+    client.assert(response.status === 200, "expected 200, got " + response.status + " (401: connect QuickBooks first)");
+  });
+  var r = response.body;
+  client.log("QuickBooks invoices: " + r.quickbooks_invoices + " | linked locally: " + r.local_linked_invoices);
+  client.log("missing locally: " + JSON.stringify(r.missing_locally) + " | missing in QuickBooks: " + JSON.stringify(r.missing_in_quickbooks));
+%}
+
+### Consistency check, repairing: queues a job for each difference (the worker re-imports / deletes)
+POST {{baseUrl}}/sync/consistency-check
+
+> {%
+  client.test("consistency check ran", function () {
+    client.assert(response.status === 200, "expected 200, got " + response.status + " (401: connect QuickBooks first)");
+    client.assert(response.body.repaired === true, "expected a repairing run");
+    client.assert(response.body.jobs_enqueued === response.body.missing_locally.length + response.body.missing_in_quickbooks.length,
+      "not every difference was queued");
+  });
+  var r = response.body;
+  client.log("differences: " + (r.missing_locally.length + r.missing_in_quickbooks.length) + " | repair jobs queued: " + r.jobs_enqueued +
+    (r.jobs_enqueued ? " (see GET /sync/jobs)" : " (all consistent)"));
+%}
+
+### Resolve a conflict on the invoice created in 1: keep "local" or "remote" (QuickBooks)
+POST {{baseUrl}}/sync/conflicts/{{invoiceId}}/resolve
+Content-Type: application/json
+
+{
+  "keep": "remote"
+}
+
+###############################################################################
+# QuickBooks data (for the connected company)
+###############################################################################
+
+### Invoices in QuickBooks, newest first
+GET {{baseUrl}}/quickbooks/invoices?limit=20&offset=0
+
+### Company info
+GET {{baseUrl}}/quickbooks/company-info
+
+### Chart of accounts, live from QuickBooks (compare with GET /accounts)
+GET {{baseUrl}}/quickbooks/accounts
+
+### Duplicate check: QuickBooks invoices created twice from the same local invoice,
+# and local invoices with the same customer, amount and due date
+GET {{baseUrl}}/quickbooks/duplicates
