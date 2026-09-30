@@ -38,6 +38,10 @@ export const getPool = (): Promise<DatabasePool> => {
   poolPromise ??= createPool(DATABASE_URL, {
     interceptors: [resultParserInterceptor],
     typeParsers,
+  }).catch((err) => {
+    // Don't cache a failed pool (e.g. Postgres was down); let the next call retry.
+    poolPromise = undefined;
+    throw err;
   });
   return poolPromise;
 };
