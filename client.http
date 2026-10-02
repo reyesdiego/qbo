@@ -61,11 +61,11 @@ Content-Type: application/json
 }
 
 ### Update the invoice created in 1 (only the fields sent are changed; queued to sync again)
-PATCH {{baseUrl}}/invoices/105
+PATCH {{baseUrl}}/invoices/{{invoiceId}}
 Content-Type: application/json
 
 {
-  "due_date": "2026-10-05"
+  "due_date": "2026-10-15"
 }
 
 ### Delete the invoice created in 1 (also deleted in QuickBooks by the worker)
@@ -100,7 +100,7 @@ Content-Type: application/json
 Idempotency-Key: {{dupKey}}
 
 {
-  "customer_name": "Retry Co",
+  "customer_name": "Retry Co1",
   "amount": "50.00",
   "due_date": "2026-12-31"
 }
@@ -118,7 +118,7 @@ Content-Type: application/json
 Idempotency-Key: {{dupKey}}
 
 {
-  "customer_name": "Retry Co",
+  "customer_name": "Retry Co1",
   "amount": "50.00",
   "due_date": "2026-12-31"
 }
@@ -156,7 +156,7 @@ Content-Type: application/json
 Idempotency-Key: {{$random.uuid}}
 
 {
-  "customer_name": "Retry Co",
+  "customer_name": "Retry Co1",
   "amount": "50.00",
   "due_date": "2026-12-31"
 }
@@ -242,7 +242,7 @@ Content-Type: application/json
 Idempotency-Key: {{paymentKey}}
 
 {
-  "amount": "18.00"
+  "amount": "32.00"
 }
 
 > {%
@@ -301,7 +301,7 @@ GET {{baseUrl}}/invoices/{{payInvoiceId}}
 
 > {%
   client.test("P6: balance 70.00", function () {
-    client.assert(response.body.balance === "70.00", "balance " + response.body.balance);
+    client.assert(response.body.balance === "50.00", "balance " + response.body.balance);
   });
 %}
 
