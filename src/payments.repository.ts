@@ -5,6 +5,7 @@ import { shouldFail } from './faults';
 import { SyncInvoice } from './invoices.schema';
 import { MoneyInput } from './money';
 import { paidLocallyUnpushed } from './quickbooks.mapping';
+import { INVOICE_STATUS, PAYMENT_SYNC_STATUSES, SYNC_STATUS } from './statuses';
 import { enqueueJob, invoiceEntityKey } from './sync.repository';
 
 // A payment recorded through the API, as returned by it
@@ -14,7 +15,7 @@ export const Payment = z.object({
   amount: z.string(), // decimal string, e.g. "30.00"
   paid_on: z.string(),
   quickbooks_id: z.string().nullable(),
-  sync_status: z.enum(['pending', 'synced', 'unknown', 'failed']),
+  sync_status: z.enum(PAYMENT_SYNC_STATUSES),
   sync_error: z.string().nullable(),
   created_at: z.string(),
 });
@@ -52,7 +53,7 @@ export const create = async (invoiceId: number, input: CreatePaymentInput, idemp
       SELECT * FROM invoices WHERE id = ${invoiceId} AND deleted_at IS NULL FOR UPDATE
     `);
     if (!invoice) return { outcome: 'invoice_not_found' };
-    if (invoice.status === 'void') return { outcome: 'invoice_void' };
+    if (invoice.status === INVOICE_STATUS.VOID) return { outcome: 'invoice_void' };
 
     const available = paidLocallyUnpushed(invoice)
       ? '0.00'
@@ -110,7 +111,7 @@ export const remove = async (invoiceId: number, paymentId: number): Promise<'del
       if (shared) return 'shared';
     }
     await tx.query(sql.unsafe`
-      UPDATE invoice_payments SET deleted_at = now(), sync_status = 'pending', sync_error = NULL WHERE id = ${paymentId}
+      UPDATE invoice_payments SET deleted_at = now(), sync_status = ${SYNC_STATUS.PENDING}, sync_error = NULL WHERE id = ${paymentId}
     `);
     await enqueueJob(tx, {
       direction: 'OUTBOUND',

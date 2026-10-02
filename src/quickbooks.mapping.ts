@@ -1,6 +1,7 @@
 // Pure mapping between QuickBooks entities and local invoices (no I/O)
 import type { InvoiceStatus, Snapshot, SyncInvoice } from './invoices.schema';
 import { moneyFromNumber } from './money';
+import { INVOICE_STATUS } from './statuses';
 
 // The QuickBooks invoice fields we use
 export type QboInvoice = {
@@ -99,29 +100,29 @@ export const isSentInQuickBooks = (qb: QboInvoice) => qb.EmailStatus === 'EmailS
 // The local status from QuickBooks' state: paid when nothing is left to pay (payments are recorded in
 // QuickBooks), and a draft becomes sent once QuickBooks sent it. "Sent" only moves forward.
 export const statusFromQuickBooks = (qb: QboInvoice, balance: string, amount: string, current: InvoiceStatus): InvoiceStatus => {
-  if (current === 'void') return 'void';
-  if (balance === '0.00' && amount !== '0.00') return 'paid';
-  if (current === 'paid') return 'sent';
-  if (current === 'draft' && isSentInQuickBooks(qb)) return 'sent';
+  if (current === INVOICE_STATUS.VOID) return INVOICE_STATUS.VOID;
+  if (balance === '0.00' && amount !== '0.00') return INVOICE_STATUS.PAID;
+  if (current === INVOICE_STATUS.PAID) return INVOICE_STATUS.SENT;
+  if (current === INVOICE_STATUS.DRAFT && isSentInQuickBooks(qb)) return INVOICE_STATUS.SENT;
   return current;
 };
 
 // A local "paid" that QuickBooks doesn't have yet: marked paid here while the balance last read from
 // QuickBooks is still above 0 (a paid invoice synced from QuickBooks always has balance 0). Only then is
 // a payment recorded for it; a stale "paid" (e.g. its payment was deleted in QuickBooks) is not paid again.
-export const paidLocallyUnpushed = (invoice: SyncInvoice) => invoice.status === 'paid' && Number(invoice.balance) > 0;
+export const paidLocallyUnpushed = (invoice: SyncInvoice) => invoice.status === INVOICE_STATUS.PAID && Number(invoice.balance) > 0;
 
 // statusFromQuickBooks for a local invoice. A local "paid" not pushed yet stays paid: its outbound job
 // records the payment, so QuickBooks' balance doesn't undo it meanwhile.
 export const syncedStatus = (invoice: SyncInvoice, qb: QboInvoice, balance: string, amount: string): InvoiceStatus =>
-  paidLocallyUnpushed(invoice) ? 'paid' : statusFromQuickBooks(qb, balance, amount, invoice.status);
+  paidLocallyUnpushed(invoice) ? INVOICE_STATUS.PAID : statusFromQuickBooks(qb, balance, amount, invoice.status);
 
 // A local status QuickBooks doesn't have yet, so it still has to be pushed: "paid" while QuickBooks
 // shows a balance, "sent" not sent there, "void" not voided there
 export const statusLeftToPush = (status: InvoiceStatus, qb: QboInvoice) =>
-  (status === 'paid' && remoteBalance(qb) !== '0.00') ||
-  (status === 'sent' && !isSentInQuickBooks(qb)) ||
-  (status === 'void' && !isVoidedInQuickBooks(qb));
+  (status === INVOICE_STATUS.PAID && remoteBalance(qb) !== '0.00') ||
+  (status === INVOICE_STATUS.SENT && !isSentInQuickBooks(qb)) ||
+  (status === INVOICE_STATUS.VOID && !isVoidedInQuickBooks(qb));
 
 // Whether QuickBooks already has everything the local invoice says: the same content, no deletion and
 // no status left to push. Only then can the local version be recorded as synced without pushing it.

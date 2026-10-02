@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { getPool } from './db';
 import { shouldFail } from './faults';
 import { Invoice, type CreateInvoiceInput, type InvoiceStatus, type SyncStatus, type UpdateInvoiceInput, touchesContent } from './invoices.schema';
+import { INVOICE_STATUS, SYNC_STATUS } from './statuses';
 import { enqueueJob, invoiceEntityKey } from './sync.repository';
 
 // Every local change is saved together with its sync job (transactional outbox): both commit or
@@ -115,8 +116,8 @@ export const findLinksByIds = async (ids: number[]) => {
 const LOCAL_CHANGE = sql.fragment`
   version = version + 1,
   updated_at = now(),
-  sync_status = CASE WHEN sync_status = 'conflict' THEN 'conflict' ELSE 'pending' END,
-  sync_error = CASE WHEN sync_status = 'conflict' THEN sync_error ELSE NULL END
+  sync_status = CASE WHEN sync_status = ${SYNC_STATUS.CONFLICT} THEN ${SYNC_STATUS.CONFLICT} ELSE ${SYNC_STATUS.PENDING} END,
+  sync_error = CASE WHEN sync_status = ${SYNC_STATUS.CONFLICT} THEN sync_error ELSE NULL END
 `;
 
 // Only updates the fields that were provided. Keys are already whitelisted by zod. Returns null, changing
@@ -128,9 +129,9 @@ export const update = async (id: number, changes: UpdateInvoiceInput): Promise<I
   const assignments = Object.entries(changes)
     .filter(([, value]) => value !== undefined)
     .map(([column, value]) => sql.fragment`${sql.identifier([column])} = ${value}`);
-  const unpays = changes.status === 'draft' || changes.status === 'sent';
+  const unpays = changes.status === INVOICE_STATUS.DRAFT || changes.status === INVOICE_STATUS.SENT;
   const guards = [
-    ...(unpays ? [sql.fragment`status <> 'paid'`] : []),
+    ...(unpays ? [sql.fragment`status <> ${INVOICE_STATUS.PAID}`] : []),
     ...(touchesContent(changes) ? [sql.fragment`NOT taxed_in_quickbooks`] : []),
   ];
   // Not in QuickBooks yet, so no payments there: the balance follows the amount
@@ -142,10 +143,10 @@ export const update = async (id: number, changes: UpdateInvoiceInput): Promise<I
     const invoice = await tx.maybeOne(sql.type(Invoice)`
       UPDATE invoices
       SET ${sql.join(assignments, sql.fragment`, `)}, ${LOCAL_CHANGE}
-      WHERE id = ${id} AND deleted_at IS NULL AND status <> 'void' ${guards.length ? sql.fragment`AND ${sql.join(guards, sql.fragment` AND `)}` : sql.fragment``}
+      WHERE id = ${id} AND deleted_at IS NULL AND status <> ${INVOICE_STATUS.VOID} ${guards.length ? sql.fragment`AND ${sql.join(guards, sql.fragment` AND `)}` : sql.fragment``}
       RETURNING *
     `);
-    if (invoice && invoice.sync_status !== 'conflict') await enqueueSync(tx, invoice, 'upsert');
+    if (invoice && invoice.sync_status !== SYNC_STATUS.CONFLICT) await enqueueSync(tx, invoice, 'upsert');
     return invoice;
   });
 };
@@ -160,7 +161,7 @@ export const remove = async (id: number): Promise<boolean> => {
       WHERE id = ${id} AND deleted_at IS NULL
       RETURNING id, sync_status
     `);
-    if (deleted && deleted.sync_status !== 'conflict') await enqueueSync(tx, deleted, 'delete');
+    if (deleted && deleted.sync_status !== SYNC_STATUS.CONFLICT) await enqueueSync(tx, deleted, 'delete');
     return deleted !== null;
   });
 };
@@ -170,6 +171,6 @@ export const setSyncState = async (id: number, syncStatus: SyncStatus, error: st
   const pool = await getPool();
   await pool.query(sql.unsafe`
     UPDATE invoices SET sync_status = ${syncStatus}, sync_error = ${error}
-    WHERE id = ${id} AND sync_status <> 'conflict'
+    WHERE id = ${id} AND sync_status <> ${SYNC_STATUS.CONFLICT}
   `);
 };

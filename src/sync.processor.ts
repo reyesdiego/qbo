@@ -10,6 +10,7 @@ import { AmbiguousWriteError, classifyError, DeferError, errorMessage, LeaseLost
 import { setSyncState } from './invoices.repository';
 import { log } from './logger';
 import { qbo as quickbooks, type QboApi } from './quickbooks.client';
+import { JOB_STATUS, SYNC_STATUS, type SyncStatus } from './statuses';
 import { processInboundJob } from './sync.inbound';
 import { processOutboundInvoice } from './sync.outbound';
 import { processOutboundPayment, setPaymentSyncState } from './sync.payments';
@@ -26,7 +27,7 @@ export const retryDelaySeconds = (attempt: number) => {
 };
 
 // The sync_status of an invoice or payment mirrors its outbound job (inbound jobs don't change it on failure)
-const setInvoiceState = async (job: SyncJob, syncStatus: 'pending' | 'unknown' | 'failed', error: string | null) => {
+const setInvoiceState = async (job: SyncJob, syncStatus: Extract<SyncStatus, 'pending' | 'unknown' | 'failed'>, error: string | null) => {
   if (job.direction !== 'OUTBOUND') return;
   if (job.entity_type === 'invoice') await setSyncState(Number(job.entity_id), syncStatus, error);
   if (job.entity_type === 'payment') await setPaymentSyncState(Number(job.entity_id), syncStatus, error);
@@ -45,14 +46,14 @@ const handleFailure = async (job: SyncJob, err: unknown, context: Record<string,
   }
   if (err instanceof AmbiguousWriteError) {
     if (!(await markUnknown(job, message))) return leaseLost();
-    await setInvoiceState(job, 'unknown', message);
+    await setInvoiceState(job, SYNC_STATUS.UNKNOWN, message);
     return log.warn('sync.job.unknown', { ...context, error_class: 'ambiguous', error: message });
   }
 
   const { errorClass, retryable } = classifyError(err);
   if (!retryable) {
     if (!(await failJob(job, errorClass, message))) return leaseLost();
-    await setInvoiceState(job, 'failed', message);
+    await setInvoiceState(job, SYNC_STATUS.FAILED, message);
     return log.error('sync.job.failed', { ...context, error_class: errorClass, error: message });
   }
 
@@ -65,11 +66,11 @@ const handleFailure = async (job: SyncJob, err: unknown, context: Record<string,
 
   const status = await rescheduleJob(job, { errorClass, message, delaySeconds, countAttempt: !waitingForConnection });
   if (status === null) return leaseLost();
-  if (status === 'FAILED') {
-    await setInvoiceState(job, 'failed', message);
+  if (status === JOB_STATUS.FAILED) {
+    await setInvoiceState(job, SYNC_STATUS.FAILED, message);
     return log.error('sync.job.failed', { ...context, error_class: errorClass, error: message, reason: 'max attempts reached' });
   }
-  await setInvoiceState(job, 'pending', message);
+  await setInvoiceState(job, SYNC_STATUS.PENDING, message);
   log.warn('sync.job.retry_scheduled', { ...context, error_class: errorClass, error: message, delay_seconds: Math.round(delaySeconds) });
 };
 

@@ -1,8 +1,15 @@
 import { z } from 'zod';
 import { MoneyInput } from './money';
+import {
+  CREATE_INVOICE_STATUSES,
+  INVOICE_STATUS,
+  STATUSES,
+  SYNC_STATUSES,
+  type InvoiceStatus,
+  type SyncStatus,
+} from './statuses';
 
-export const STATUSES = ['draft', 'sent', 'paid', 'void'] as const;
-export const SYNC_STATUSES = ['pending', 'synced', 'conflict', 'unknown', 'failed'] as const;
+export { CREATE_INVOICE_STATUSES, INVOICE_STATUS, STATUSES, SYNC_STATUS, SYNC_STATUSES } from './statuses';
 
 // The invoice content kept in sync with QuickBooks. last_synced_snapshot stores it as both sides
 // agreed at the last sync, so we can tell which side changed what.
@@ -50,12 +57,12 @@ export const CreateInvoiceInput = z.object({
   customer_name: z.string().trim().min(1),
   amount: MoneyInput,
   currency: z.string().length(3).toUpperCase().default('USD'),
-  status: z.enum(['draft', 'sent', 'paid']).default('draft'),
+  status: z.enum(CREATE_INVOICE_STATUSES).default(INVOICE_STATUS.DRAFT),
   due_date: z.string().date(), // YYYY-MM-DD
 });
 
 // For updates every field is optional, but at least one must be sent. "void" voids it in QuickBooks too.
-export const UpdateInvoiceInput = CreateInvoiceInput.extend({ status: z.enum(['draft', 'sent', 'paid', 'void']) })
+export const UpdateInvoiceInput = CreateInvoiceInput.extend({ status: z.enum(STATUSES) })
   .partial()
   .refine((data) => Object.values(data).some((v) => v !== undefined), {
     message: 'At least one field must be provided',
@@ -66,10 +73,8 @@ export type SyncInvoice = z.infer<typeof SyncInvoice>;
 export type Snapshot = z.infer<typeof Snapshot>;
 export type CreateInvoiceInput = z.infer<typeof CreateInvoiceInput>;
 export type UpdateInvoiceInput = z.infer<typeof UpdateInvoiceInput>;
-export type InvoiceStatus = (typeof STATUSES)[number];
-export type SyncStatus = (typeof SYNC_STATUSES)[number];
+export type { InvoiceStatus, SyncStatus };
 
 // Whether a change touches the content kept in sync (not only the status)
 export const touchesContent = (changes: object) =>
   (['customer_name', 'amount', 'currency', 'due_date'] as const).some((field) => field in changes && (changes as Record<string, unknown>)[field] !== undefined);
-

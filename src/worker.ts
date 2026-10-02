@@ -16,6 +16,7 @@ import { errorMessage, NotConnectedError } from './errors';
 import { setSyncState } from './invoices.repository';
 import { log } from './logger';
 import { qbo } from './quickbooks.client';
+import { JOB_STATUS, SYNC_STATUS } from './statuses';
 import { setPaymentSyncState } from './sync.payments';
 import { processJob } from './sync.processor';
 import { checkConsistency } from './sync.consistency';
@@ -93,8 +94,8 @@ const listenForJobs = async () => {
 const recoverLeases = async () => {
   for (const job of await recoverExpiredLeases()) {
     log.warn('sync.job.lease_expired', { job_id: job.id, direction: job.direction, entity_id: job.entity_id, new_status: job.status });
-    if (job.direction === 'OUTBOUND' && job.status !== 'PENDING') {
-      const state = job.status === 'UNKNOWN' ? 'unknown' : 'failed';
+    if (job.direction === 'OUTBOUND' && job.status !== JOB_STATUS.PENDING) {
+      const state = job.status === JOB_STATUS.UNKNOWN ? SYNC_STATUS.UNKNOWN : SYNC_STATUS.FAILED;
       if (job.entity_type === 'payment') await setPaymentSyncState(Number(job.entity_id), state, 'Worker stopped while syncing');
       else await setSyncState(Number(job.entity_id), state, 'Worker stopped while syncing');
     }

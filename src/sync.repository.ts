@@ -8,8 +8,7 @@ import { z } from 'zod';
 import { getPool } from './db';
 import { LeaseLostError } from './errors';
 import { shouldFail } from './faults';
-
-export const JOB_STATUSES = ['PENDING', 'PROCESSING', 'COMPLETED', 'FAILED', 'UNKNOWN'] as const;
+import { JOB_STATUS, JOB_STATUSES, SYNC_STATUS, type JobStatus } from './statuses';
 
 export const SyncJob = z.object({
   id: z.string(),
@@ -38,7 +37,7 @@ export const SyncJob = z.object({
   updated_at: z.string(),
 });
 export type SyncJob = z.infer<typeof SyncJob>;
-export type JobStatus = (typeof JOB_STATUSES)[number];
+export { JOB_STATUSES };
 
 const Id = z.object({ id: z.string() });
 const Status = z.object({ status: z.enum(JOB_STATUSES) });
@@ -73,7 +72,7 @@ export const enqueueJob = async (db: CommonQueryMethods, job: NewJob, { skipIfPe
     WHERE ${!skipIfPending} OR NOT EXISTS (
       SELECT 1 FROM sync_jobs
       WHERE entity_key = ${job.entityKey} AND direction = ${job.direction} AND entity_type = ${job.entityType}
-        AND status = 'PENDING'
+        AND status = ${JOB_STATUS.PENDING}
     )
     RETURNING id
   `);
@@ -166,17 +165,17 @@ export const claimNextJob = async ({ workerId, leaseSeconds, entityKeys }: Claim
 
   return pool.maybeOne(sql.type(SyncJob)`
     UPDATE sync_jobs
-    SET status = 'PROCESSING', attempts = attempts + 1, claim_token = gen_random_uuid(),
+    SET status = ${JOB_STATUS.PROCESSING}, attempts = attempts + 1, claim_token = gen_random_uuid(),
         locked_by = ${workerId}, locked_at = now(),
         lease_expires_at = now() + make_interval(secs => ${leaseSeconds}), updated_at = now()
     WHERE id = (
       SELECT j.id FROM sync_jobs j
-      WHERE j.status = 'PENDING' AND j.next_run_at <= now() ${onlyEntityKeys(entityKeys, sql.identifier(['j', 'entity_key']))}
+      WHERE j.status = ${JOB_STATUS.PENDING} AND j.next_run_at <= now() ${onlyEntityKeys(entityKeys, sql.identifier(['j', 'entity_key']))}
         AND NOT EXISTS (
           SELECT 1 FROM sync_jobs other
           WHERE other.entity_key = j.entity_key AND other.id <> j.id
-            AND (other.status IN ('PROCESSING', 'UNKNOWN')
-                 OR (other.status = 'PENDING' AND (other.created_at, other.id) < (j.created_at, j.id)))
+            AND (other.status IN (${JOB_STATUS.PROCESSING}, ${JOB_STATUS.UNKNOWN})
+                 OR (other.status = ${JOB_STATUS.PENDING} AND (other.created_at, other.id) < (j.created_at, j.id)))
         )
       ORDER BY j.next_run_at, j.created_at
       LIMIT 1
@@ -188,7 +187,7 @@ export const claimNextJob = async ({ workerId, leaseSeconds, entityKeys }: Claim
 
 // Only the worker holding the job's claim token can change it
 const owned = (job: SyncJob) =>
-  sql.fragment`id = ${job.id} AND claim_token = ${job.claim_token} AND status IN ('PROCESSING', 'UNKNOWN')`;
+  sql.fragment`id = ${job.id} AND claim_token = ${job.claim_token} AND status IN (${JOB_STATUS.PROCESSING}, ${JOB_STATUS.UNKNOWN})`;
 
 // Recorded right before sending a create to QuickBooks: if the worker dies after this, the job
 // becomes UNKNOWN instead of being retried, because the invoice may already exist in QuickBooks
@@ -208,7 +207,7 @@ export const markCreateSent = async (job: SyncJob, details: Record<string, unkno
 export const completeJob = async (db: CommonQueryMethods, job: SyncJob, result: string) => {
   const done = await db.maybeOne(sql.type(Id)`
     UPDATE sync_jobs
-    SET status = 'COMPLETED', completed_at = now(), claim_token = NULL, lease_expires_at = NULL,
+    SET status = ${JOB_STATUS.COMPLETED}, completed_at = now(), claim_token = NULL, lease_expires_at = NULL,
         duration_ms = (extract(epoch FROM now() - locked_at) * 1000)::int,
         payload = payload || ${JSON.stringify({ result })}::jsonb, updated_at = now()
     WHERE ${owned(job)}
@@ -231,7 +230,7 @@ export const rescheduleJob = async (job: SyncJob, { errorClass, message, delaySe
   const pool = await getPool();
   const updated = await pool.maybeOne(sql.type(Status)`
     UPDATE sync_jobs
-    SET status = CASE WHEN ${countAttempt} AND attempts >= max_attempts THEN 'FAILED' ELSE 'PENDING' END,
+    SET status = CASE WHEN ${countAttempt} AND attempts >= max_attempts THEN ${JOB_STATUS.FAILED} ELSE ${JOB_STATUS.PENDING} END,
         attempts = CASE WHEN ${countAttempt} THEN attempts ELSE attempts - 1 END,
         next_run_at = now() + make_interval(secs => ${delaySeconds}),
         claim_token = NULL, lease_expires_at = NULL, create_sent_at = NULL,
@@ -239,7 +238,7 @@ export const rescheduleJob = async (job: SyncJob, { errorClass, message, delaySe
     WHERE ${owned(job)}
     RETURNING status
   `);
-  if (updated?.status === 'FAILED') await markEventFailed(job, message);
+  if (updated?.status === JOB_STATUS.FAILED) await markEventFailed(job, message);
   return updated?.status ?? null;
 };
 
@@ -248,7 +247,7 @@ export const failJob = async (job: SyncJob, errorClass: string, message: string)
   const pool = await getPool();
   const updated = await pool.maybeOne(sql.type(Id)`
     UPDATE sync_jobs
-    SET status = 'FAILED', claim_token = NULL, lease_expires_at = NULL,
+    SET status = ${JOB_STATUS.FAILED}, claim_token = NULL, lease_expires_at = NULL,
         last_error = ${message}, last_error_class = ${errorClass}, updated_at = now()
     WHERE ${owned(job)}
     RETURNING id
@@ -264,7 +263,7 @@ export const markUnknown = async (job: SyncJob, message: string) => {
   const pool = await getPool();
   const updated = await pool.maybeOne(sql.type(Id)`
     UPDATE sync_jobs
-    SET status = 'UNKNOWN', claim_token = NULL, lease_expires_at = NULL, next_run_at = now(),
+    SET status = ${JOB_STATUS.UNKNOWN}, claim_token = NULL, lease_expires_at = NULL, next_run_at = now(),
         last_error = ${message}, last_error_class = 'ambiguous', updated_at = now()
     WHERE ${owned(job)}
     RETURNING id
@@ -276,7 +275,7 @@ const markEventFailed = async (job: Pick<SyncJob, 'event_id'>, message: string) 
   if (!job.event_id) return;
   const pool = await getPool();
   await pool.query(sql.unsafe`
-    UPDATE sync_events SET processing_status = 'failed', processed_at = now(), error = ${message}
+    UPDATE sync_events SET processing_status = ${SYNC_STATUS.FAILED}, processed_at = now(), error = ${message}
     WHERE id = ${job.event_id}
   `);
 };
@@ -287,19 +286,19 @@ export const recoverExpiredLeases = async () => {
   const pool = await getPool();
   const recovered = await pool.any(sql.type(SyncJob.pick({ id: true, status: true, direction: true, entity_type: true, entity_id: true, event_id: true }))`
     UPDATE sync_jobs
-    SET status = CASE WHEN status = 'UNKNOWN' OR create_sent_at IS NOT NULL THEN 'UNKNOWN'
-                      WHEN attempts >= max_attempts THEN 'FAILED'
-                      ELSE 'PENDING' END,
+    SET status = CASE WHEN status = ${JOB_STATUS.UNKNOWN} OR create_sent_at IS NOT NULL THEN ${JOB_STATUS.UNKNOWN}
+                      WHEN attempts >= max_attempts THEN ${JOB_STATUS.FAILED}
+                      ELSE ${JOB_STATUS.PENDING} END,
         claim_token = NULL, lease_expires_at = NULL, locked_by = NULL,
-        last_error = CASE WHEN status = 'UNKNOWN' THEN last_error
+        last_error = CASE WHEN status = ${JOB_STATUS.UNKNOWN} THEN last_error
                           ELSE 'Lease expired: the worker stopped or took too long' END,
-        last_error_class = CASE WHEN status = 'UNKNOWN' THEN last_error_class ELSE 'lease_expired' END,
+        last_error_class = CASE WHEN status = ${JOB_STATUS.UNKNOWN} THEN last_error_class ELSE 'lease_expired' END,
         updated_at = now()
-    WHERE status IN ('PROCESSING', 'UNKNOWN') AND lease_expires_at < now()
+    WHERE status IN (${JOB_STATUS.PROCESSING}, ${JOB_STATUS.UNKNOWN}) AND lease_expires_at < now()
     RETURNING id, status, direction, entity_type, entity_id, event_id
   `);
   for (const job of recovered) {
-    if (job.status === 'FAILED') await markEventFailed(job, 'Lease expired on the last attempt');
+    if (job.status === JOB_STATUS.FAILED) await markEventFailed(job, 'Lease expired on the last attempt');
   }
   return recovered;
 };
@@ -329,7 +328,7 @@ export const claimUnknownJob = async ({ workerId, leaseSeconds, graceSeconds, en
         lease_expires_at = now() + make_interval(secs => ${leaseSeconds}), updated_at = now()
     WHERE id = (
       SELECT id FROM sync_jobs
-      WHERE status = 'UNKNOWN' AND direction = 'OUTBOUND' AND next_run_at <= now()
+      WHERE status = ${JOB_STATUS.UNKNOWN} AND direction = 'OUTBOUND' AND next_run_at <= now()
         AND create_sent_at <= now() - make_interval(secs => ${graceSeconds})
         AND (lease_expires_at IS NULL OR lease_expires_at < now()) ${onlyEntityKeys(entityKeys)}
       ORDER BY create_sent_at
@@ -345,7 +344,7 @@ export const requeueUnknown = async (job: SyncJob, message: string) => {
   const pool = await getPool();
   await pool.query(sql.unsafe`
     UPDATE sync_jobs
-    SET status = 'PENDING', create_sent_at = NULL, claim_token = NULL, lease_expires_at = NULL,
+    SET status = ${JOB_STATUS.PENDING}, create_sent_at = NULL, claim_token = NULL, lease_expires_at = NULL,
         next_run_at = now(), last_error = ${message}, last_error_class = 'reconciled', updated_at = now()
     WHERE ${owned(job)}
   `);
@@ -420,20 +419,20 @@ export const retryJobManually = async (id: string) => {
   return pool.transaction(async (tx) => {
     const job = await tx.maybeOne(sql.type(SyncJob)`
       UPDATE sync_jobs
-      SET status = 'PENDING', attempts = 0, next_run_at = now(), create_sent_at = NULL,
+      SET status = ${JOB_STATUS.PENDING}, attempts = 0, next_run_at = now(), create_sent_at = NULL,
           claim_token = NULL, lease_expires_at = NULL, last_error = NULL, last_error_class = NULL, updated_at = now()
-      WHERE id = ${id} AND status IN ('FAILED', 'UNKNOWN')
+      WHERE id = ${id} AND status IN (${JOB_STATUS.FAILED}, ${JOB_STATUS.UNKNOWN})
       RETURNING *
     `);
     if (job?.direction === 'OUTBOUND' && job.entity_type === 'invoice') {
       await tx.query(sql.unsafe`
-        UPDATE invoices SET sync_status = 'pending', sync_error = NULL
-        WHERE id = ${Number(job.entity_id)} AND sync_status IN ('failed', 'unknown')
+        UPDATE invoices SET sync_status = ${SYNC_STATUS.PENDING}, sync_error = NULL
+        WHERE id = ${Number(job.entity_id)} AND sync_status IN (${SYNC_STATUS.FAILED}, ${SYNC_STATUS.UNKNOWN})
       `);
     }
     if (job?.direction === 'OUTBOUND' && job.entity_type === 'payment') {
       await tx.query(sql.unsafe`
-        UPDATE invoice_payments SET sync_status = 'pending', sync_error = NULL WHERE id = ${Number(job.entity_id)}
+        UPDATE invoice_payments SET sync_status = ${SYNC_STATUS.PENDING}, sync_error = NULL WHERE id = ${Number(job.entity_id)}
       `);
     }
     if (job) await tx.query(sql.unsafe`SELECT pg_notify('sync_jobs', '')`);
@@ -446,7 +445,7 @@ export const wakeJobsWaitingForConnection = async () => {
   const pool = await getPool();
   await pool.query(sql.unsafe`
     UPDATE sync_jobs SET next_run_at = now()
-    WHERE status = 'PENDING' AND last_error_class IN ('not_connected', 'auth')
+    WHERE status = ${JOB_STATUS.PENDING} AND last_error_class IN ('not_connected', 'auth')
   `);
   await pool.query(sql.unsafe`SELECT pg_notify('sync_jobs', '')`);
 };
@@ -467,15 +466,15 @@ export const getStats = async () => {
     }),
   )`
     SELECT
-      count(*) FILTER (WHERE status = 'PENDING') AS pending,
-      count(*) FILTER (WHERE status = 'PROCESSING') AS processing,
-      count(*) FILTER (WHERE status = 'COMPLETED') AS completed,
-      count(*) FILTER (WHERE status = 'FAILED') AS failed,
-      count(*) FILTER (WHERE status = 'UNKNOWN') AS unknown,
+      count(*) FILTER (WHERE status = ${JOB_STATUS.PENDING}) AS pending,
+      count(*) FILTER (WHERE status = ${JOB_STATUS.PROCESSING}) AS processing,
+      count(*) FILTER (WHERE status = ${JOB_STATUS.COMPLETED}) AS completed,
+      count(*) FILTER (WHERE status = ${JOB_STATUS.FAILED}) AS failed,
+      count(*) FILTER (WHERE status = ${JOB_STATUS.UNKNOWN}) AS unknown,
       count(*) FILTER (WHERE attempts > 1) AS retried_jobs,
       coalesce(sum(greatest(attempts - 1, 0)), 0)::int AS total_retries,
-      extract(epoch FROM now() - min(created_at) FILTER (WHERE status = 'PENDING'))::int AS oldest_pending_seconds,
-      round(avg(duration_ms) FILTER (WHERE status = 'COMPLETED' AND completed_at > now() - interval '1 hour'))::int
+      extract(epoch FROM now() - min(created_at) FILTER (WHERE status = ${JOB_STATUS.PENDING}))::int AS oldest_pending_seconds,
+      round(avg(duration_ms) FILTER (WHERE status = ${JOB_STATUS.COMPLETED} AND completed_at > now() - interval '1 hour'))::int
         AS avg_duration_ms_last_hour
     FROM sync_jobs
   `);
