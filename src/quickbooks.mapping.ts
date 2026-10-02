@@ -1,4 +1,6 @@
 // Pure mapping between QuickBooks entities and local invoices (no I/O)
+import { z } from 'zod';
+import { UnexpectedQuickBooksResponseError } from './errors';
 import type { InvoiceStatus, Snapshot, SyncInvoice } from './invoices.schema';
 import { moneyFromNumber } from './money';
 import { INVOICE_STATUS } from './statuses';
@@ -19,6 +21,29 @@ export type QboInvoice = {
   LinkedTxn?: { TxnId: string; TxnType: string }[]; // e.g. the payments applied to it
   TxnTaxDetail?: { TotalTax?: number }; // sales tax, included in TotalAmt
   MetaData?: { CreateTime?: string; LastUpdatedTime?: string };
+};
+
+const QboInvoiceSchema: z.ZodType<QboInvoice> = z.object({
+  Id: z.string(),
+  SyncToken: z.string(),
+  status: z.literal('Deleted').optional(),
+  CustomerRef: z.object({ value: z.string().optional(), name: z.string().optional() }).passthrough().optional(),
+  TotalAmt: z.number().optional(),
+  Balance: z.number().optional(),
+  CurrencyRef: z.object({ value: z.string() }).passthrough().optional(),
+  DueDate: z.string().optional(),
+  TxnDate: z.string().optional(),
+  PrivateNote: z.string().optional(),
+  EmailStatus: z.string().optional(),
+  LinkedTxn: z.array(z.object({ TxnId: z.string(), TxnType: z.string() }).passthrough()).optional(),
+  TxnTaxDetail: z.object({ TotalTax: z.number().optional() }).passthrough().optional(),
+  MetaData: z.object({ CreateTime: z.string().optional(), LastUpdatedTime: z.string().optional() }).passthrough().optional(),
+}).passthrough();
+
+export const parseQboInvoice = (value: unknown, context = 'QuickBooks invoice'): QboInvoice => {
+  const parsed = QboInvoiceSchema.safeParse(value);
+  if (parsed.success) return parsed.data;
+  throw new UnexpectedQuickBooksResponseError(`${context} response was malformed: ${parsed.error.issues.map((issue) => issue.path.join('.') || issue.code).join(', ')}`);
 };
 
 // A payment changes the balance (and so the paid status) of the invoices it pays

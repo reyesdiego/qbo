@@ -112,6 +112,27 @@ test('ambiguous create that never reached QuickBooks is sent again after reconci
   assert.equal((await loadInvoice(local.id)).sync_status, 'synced');
 });
 
+test('a malformed QuickBooks create response is treated as unknown, not blindly retried', async () => {
+  const qbo = new FakeQuickBooks();
+  const local = await createLocal();
+  const request = qbo.request.bind(qbo);
+  let malformed = true;
+  qbo.request = async (buildPath, options = {}) => {
+    const response = await request(buildPath, options);
+    if (malformed && options.method === 'POST' && buildPath('test-realm') === 'invoice') {
+      malformed = false;
+      return {};
+    }
+    return response;
+  };
+
+  await runJobs([local.key], qbo);
+
+  assert.equal(qbo.countCalls('POST invoice'), 1);
+  assert.equal((await jobsFor(local.key))[0].status, 'UNKNOWN');
+  assert.equal((await loadInvoice(local.id)).sync_status, 'unknown');
+});
+
 test('reconciliation fails the job when several QuickBooks invoices carry the reference', async () => {
   const qbo = new FakeQuickBooks();
   const local = await createLocal();

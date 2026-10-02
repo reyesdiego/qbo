@@ -17,6 +17,9 @@ export class LeaseLostError extends Error {}
 // never resend blindly, reconcile first
 export class AmbiguousWriteError extends Error {}
 
+// QuickBooks answered, but the body did not contain the shape this integration needs.
+export class UnexpectedQuickBooksResponseError extends Error {}
+
 export type ErrorClass =
   | 'not_connected'
   | 'auth'

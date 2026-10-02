@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto';
 import { sql, type CommonQueryMethods } from 'slonik';
 import { z } from 'zod';
 import { getPool } from './db';
-import { AmbiguousWriteError, classifyError, errorMessage, NotConnectedError, PermanentError } from './errors';
+import { AmbiguousWriteError, classifyError, errorMessage, NotConnectedError, PermanentError, UnexpectedQuickBooksResponseError } from './errors';
 import { shouldFail } from './faults';
 import { SyncInvoice, type Snapshot } from './invoices.schema';
 import { moneyToNumber } from './money';
@@ -19,6 +19,7 @@ import {
   localInvoiceKey,
   localSnapshot,
   paidLocallyUnpushed,
+  parseQboInvoice,
   remoteBalance,
   statusLeftToPush,
   isSentInQuickBooks,
@@ -34,7 +35,7 @@ const loadInvoice = (db: CommonQueryMethods, id: number) =>
   db.maybeOne(sql.type(SyncInvoice)`SELECT * FROM invoices WHERE id = ${id}`);
 
 export const fetchInvoice = async (qbo: QboApi, id: string): Promise<QboInvoice> =>
-  (await qbo.request(() => `invoice/${id}`)).Invoice;
+  parseQboInvoice((await qbo.request(() => `invoice/${id}`)).Invoice, `QuickBooks invoice ${id}`);
 
 const complete = async (job: SyncJob, result: string) => {
   const pool = await getPool();
@@ -236,10 +237,10 @@ const createInQuickBooks = async (job: SyncJob, invoice: SyncInvoice, realmId: s
       },
     });
     if (shouldFail('qbo.create.response-lost')) throw new AmbiguousWriteError('Injected fault: create response lost');
-    created = data.Invoice;
+    created = parseQboInvoice(data.Invoice, 'QuickBooks create invoice');
   } catch (err) {
     // Timeouts, dropped connections, 5xx: the invoice may exist. Don't resend; reconcile.
-    if (err instanceof AmbiguousWriteError || classifyError(err).ambiguous) {
+    if (err instanceof AmbiguousWriteError || err instanceof UnexpectedQuickBooksResponseError || classifyError(err).ambiguous) {
       throw new AmbiguousWriteError(`Create result unknown (${errorMessage(err)}); reference ${reference}`);
     }
     throw err;
@@ -301,7 +302,7 @@ const updateInQuickBooks = async (job: SyncJob, invoice: SyncInvoice, realmId: s
         ...(markSent ? { EmailStatus: 'EmailSent' } : {}),
       },
     });
-    latest = data.Invoice;
+    latest = parseQboInvoice(data.Invoice, `QuickBooks update invoice ${remote.Id}`);
     done.push(contentChanged ? 'updated in QuickBooks' : 'marked as sent in QuickBooks');
   }
   const paid = needsPayment(invoice, latest) ? await recordPayment(qbo, invoice, latest) : undefined;

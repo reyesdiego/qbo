@@ -28,7 +28,7 @@ Idempotency-Key: {{$random.uuid}}
   "customer_name": "Acme Corp Diego",
   "amount": "300.00",
   "currency": "USD",
-  "due_date": "2026-10-05"
+  "due_date": "2026-10-11"
 }
 
 > {%
@@ -57,7 +57,7 @@ PATCH {{baseUrl}}/invoices/{{invoiceId}}
 Content-Type: application/json
 
 {
-  "status": "sent"
+  "status": "draft"
 }
 
 ### Update the invoice created in 1 (only the fields sent are changed; queued to sync again)
@@ -65,7 +65,7 @@ PATCH {{baseUrl}}/invoices/{{invoiceId}}
 Content-Type: application/json
 
 {
-  "due_date": "2026-10-15"
+  "due_date": "2026-10-23"
 }
 
 ### Delete the invoice created in 1 (also deleted in QuickBooks by the worker)
