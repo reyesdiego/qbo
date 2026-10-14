@@ -73,6 +73,30 @@ test('an invoice deleted in QuickBooks whose notification was missed is deleted 
   assert.equal(await localRowFor(realm, quickbooksId), null);
 });
 
+test('a payment deleted in QuickBooks whose notification was missed is deleted locally', async () => {
+  const { realm, qbo } = company();
+  const { id } = await syncedInvoice(qbo);
+  await payments.create(id, { amount: '30.00' });
+  await runJobs([invoiceEntityKey(id)], qbo);
+  const [paid] = await payments.listForInvoice(id);
+  assert.ok(paid.quickbooks_id);
+
+  // Deleted in QuickBooks while disconnected: no webhook
+  await qbo.request(() => 'payment', {
+    method: 'POST',
+    params: { operation: 'delete' },
+    body: { Id: paid.quickbooks_id!, SyncToken: '0' },
+  });
+
+  const report = await checkConsistency(qbo);
+  assert.deepEqual(report.missing_payments_in_quickbooks.map((m) => m.quickbooks_id), [paid.quickbooks_id]);
+  assert.equal(report.jobs_enqueued, 2); // payment delete + invoice balance refresh
+
+  await runJobs([invoiceEntityKey(id), `qbo-payment:${realm}:${paid.quickbooks_id}`], qbo);
+  assert.deepEqual(await payments.listForInvoice(id), []);
+  assert.equal((await loadInvoice(id)).balance, '100.00');
+});
+
 test('missing from QuickBooks\' list but found by a direct GET: not deleted', async () => {
   const { realm, qbo } = company();
   const { quickbooksId } = await syncedInvoice(qbo);

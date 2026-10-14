@@ -50,29 +50,66 @@ export const checkConsistency = async (qbo: QboApi, { repair = true }: Options =
     }
   }
 
+  // Every QuickBooks payment id (paginated). Like invoices above, a missing id is confirmed
+  // with a direct GET before treating it as deleted.
+  const remotePayments = new Set<string>();
+  for (let start = 1; ; start += PAGE_SIZE) {
+    const data = await qbo.query(`SELECT * FROM Payment STARTPOSITION ${start} MAXRESULTS ${PAGE_SIZE}`);
+    const page: { Id: string }[] = data.QueryResponse.Payment ?? [];
+    for (const payment of page) remotePayments.add(payment.Id);
+    if (page.length < PAGE_SIZE) break;
+  }
+
+  const localPayments = await pool.any(sql.type(z.object({
+    quickbooks_id: z.string(),
+    invoice_id: z.number(),
+    invoice_quickbooks_id: z.string(),
+  }))`
+    SELECT p.quickbooks_id, p.invoice_id, i.quickbooks_id AS invoice_quickbooks_id
+    FROM invoice_payments p JOIN invoices i ON i.id = p.invoice_id
+    WHERE i.quickbooks_realm_id = ${realmId} AND p.quickbooks_id IS NOT NULL AND p.deleted_at IS NULL
+  `);
+
+  // A payment deleted in QuickBooks while disconnected (CDC can't list it anymore): confirmed
+  // with a direct GET, like invoices above.
+  const missingPaymentsInQuickBooks: { quickbooks_id: string; invoice_id: number; invoice_quickbooks_id: string }[] = [];
+  for (const payment of localPayments.filter((p) => !remotePayments.has(p.quickbooks_id))) {
+    try {
+      await qbo.request(() => `payment/${payment.quickbooks_id}`);
+    } catch (err) {
+      if (classifyError(err).errorClass !== 'not_found') throw err;
+      missingPaymentsInQuickBooks.push(payment);
+    }
+  }
+
   // Repairs go through the queue, exactly like notifications: the worker imports what's missing
   // (with its payments) and deletes what's gone. Keys are unique per run, so a later run can repair
   // the same invoice again if needed.
   let jobsEnqueued = 0;
   if (repair) {
     const run = randomUUID();
-    const enqueue = (id: string, operation: 'update' | 'delete', reason: string) =>
+    const enqueue = (entity: 'invoice' | 'payment', id: string, operation: 'update' | 'delete', reason: string) =>
       pool.transaction((tx) =>
         recordEventAndEnqueue(tx, {
           source: 'reconciliation',
           realmId,
-          entity: 'invoice',
+          entity,
           id,
           operation,
-          eventKey: `consistency:${run}:invoice:${id}:${operation}`,
+          eventKey: `consistency:${run}:${entity}:${id}:${operation}`,
           payload: { reason },
         }),
       );
     for (const id of missingLocally) {
-      if ((await enqueue(id, 'update', 'missing locally')) === 'enqueued') jobsEnqueued++;
+      if ((await enqueue('invoice', id, 'update', 'missing locally')) === 'enqueued') jobsEnqueued++;
     }
     for (const { quickbooks_id } of missingInQuickBooks) {
-      if ((await enqueue(quickbooks_id, 'delete', 'not in QuickBooks')) === 'enqueued') jobsEnqueued++;
+      if ((await enqueue('invoice', quickbooks_id, 'delete', 'not in QuickBooks')) === 'enqueued') jobsEnqueued++;
+    }
+    for (const { quickbooks_id, invoice_quickbooks_id } of missingPaymentsInQuickBooks) {
+      if ((await enqueue('payment', quickbooks_id, 'delete', 'payment not in QuickBooks')) === 'enqueued') jobsEnqueued++;
+      // The invoice's balance changed with the deletion: refresh it like its own notification would
+      if ((await enqueue('invoice', invoice_quickbooks_id, 'update', 'payment deleted in QuickBooks')) === 'enqueued') jobsEnqueued++;
     }
   }
 
@@ -81,6 +118,7 @@ export const checkConsistency = async (qbo: QboApi, { repair = true }: Options =
     local_linked_invoices: local.length,
     missing_locally: missingLocally,
     missing_in_quickbooks: missingInQuickBooks,
+    missing_payments_in_quickbooks: missingPaymentsInQuickBooks.map(({ quickbooks_id, invoice_id }) => ({ quickbooks_id, invoice_id })),
     repaired: repair,
     jobs_enqueued: jobsEnqueued,
   };

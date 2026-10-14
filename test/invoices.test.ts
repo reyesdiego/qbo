@@ -136,6 +136,74 @@ test('Idempotency-Key prevents duplicate invoices on retries', async () => {
   await request('DELETE', `/invoices/${other.body.id}`);
 });
 
+test('Idempotency-Key with a different body still returns the first invoice', async () => {
+  const key = randomUUID();
+  const headers = { 'Idempotency-Key': key };
+  const first = await request(
+    'POST',
+    '/invoices',
+    { customer_name: uniqueName('IdemSameKey'), amount: '50.00', due_date: '2026-12-31' },
+    headers,
+  );
+  assert.equal(first.status, 201);
+
+  const retry = await request(
+    'POST',
+    '/invoices',
+    { customer_name: uniqueName('IdemSameKey'), amount: '99.99', due_date: '2026-12-31' },
+    headers,
+  );
+  assert.equal(retry.status, 200);
+  assert.equal(retry.body.id, first.body.id);
+  assert.equal(retry.body.amount, '50.00'); // first payload wins, second is ignored
+
+  await request('DELETE', `/invoices/${first.body.id}`);
+});
+
+test('an invalid body does not consume the Idempotency-Key', async () => {
+  const key = randomUUID();
+  const headers = { 'Idempotency-Key': key };
+  const invalid = await request('POST', '/invoices', { customer_name: '', amount: '-5' }, headers);
+  assert.equal(invalid.status, 400);
+
+  const retry = await request(
+    'POST',
+    '/invoices',
+    { customer_name: uniqueName('IdemReuseKey'), amount: '10.00', due_date: '2026-12-31' },
+    headers,
+  );
+  assert.equal(retry.status, 201);
+
+  await request('DELETE', `/invoices/${retry.body.id}`);
+});
+
+test('an overlong Idempotency-Key is rejected with 400', async () => {
+  const res = await request(
+    'POST',
+    '/invoices',
+    { customer_name: uniqueName('Long key'), amount: '10.00', due_date: '2026-12-31' },
+    { 'Idempotency-Key': 'k'.repeat(256) },
+  );
+  assert.equal(res.status, 400);
+});
+
+test('concurrent retries with the same Idempotency-Key create only one invoice', async () => {
+  const key = randomUUID();
+  const headers = { 'Idempotency-Key': key };
+  const body = { customer_name: uniqueName('Concurrent'), amount: '25.00', due_date: '2026-12-31' };
+
+  const results = await Promise.all(
+    Array.from({ length: 5 }, () => request('POST', '/invoices', body, headers)),
+  );
+  const ids = results.map((r) => r.body?.id);
+  assert.ok(ids.every((id) => id === ids[0]));
+  assert.equal(results.filter((r) => r.status === 201).length, 1);
+  assert.equal(results.filter((r) => r.status === 200).length, 4);
+  assert.equal((await jobsFor(invoiceEntityKey(ids[0]))).length, 1);
+
+  await request('DELETE', `/invoices/${ids[0]}`);
+});
+
 test('POST /invoices without an Idempotency-Key: 400, nothing created', async () => {
   const customer = uniqueName('No key');
   const res = await request('POST', '/invoices', { customer_name: customer, amount: '10.00', due_date: '2026-12-31' });
@@ -173,13 +241,67 @@ test('recording payments: POST /invoices/:id/payments', async (t) => {
     assert.ok(jobs.some((job) => job.entity_type === 'payment' && job.entity_id === String(paid.body.id)));
   });
 
-  await t.test('Idempotency-Key: a retry returns the same payment', async () => {
-    const headers = { 'Idempotency-Key': `pay-${Date.now()}` };
-    const first = await request('POST', `/invoices/${id}/payments`, { amount: '10.00' }, headers);
-    const retry = await request('POST', `/invoices/${id}/payments`, { amount: '10.00' }, headers);
+  await t.test('Idempotency-Key: submitting the same payment five times returns the same result', async () => {
+    const headers = { 'Idempotency-Key': `pay-${Date.now()}-${Math.random()}` };
+    const jobsBefore = (await jobsFor(invoiceEntityKey(id))).length;
+    const results = [];
+    for (let i = 0; i < 5; i++) {
+      results.push(await request('POST', `/invoices/${id}/payments`, { amount: '10.00' }, headers));
+    }
+    assert.equal(results[0].status, 201);
+    for (const retry of results.slice(1)) {
+      assert.equal(retry.status, 200);
+      assert.deepEqual(retry.body, results[0].body);
+    }
+    assert.equal((await jobsFor(invoiceEntityKey(id))).length, jobsBefore + 1);
+  });
+
+  await t.test('same key with a different amount still returns the first payment', async () => {
+    const headers = { 'Idempotency-Key': `pay-diff-${Date.now()}-${Math.random()}` };
+    const fresh = await createInvoice({ customer_name: uniqueName('PayDiff'), amount: '100.00', due_date: '2026-12-31' });
+    const first = await request('POST', `/invoices/${fresh.body.id}/payments`, { amount: '10.00' }, headers);
     assert.equal(first.status, 201);
+    const retry = await request('POST', `/invoices/${fresh.body.id}/payments`, { amount: '20.00' }, headers);
     assert.equal(retry.status, 200);
     assert.equal(retry.body.id, first.body.id);
+    assert.equal(retry.body.amount, '10.00');
+    await request('DELETE', `/invoices/${fresh.body.id}`);
+  });
+
+  await t.test('same key for another invoice: 409, nothing recorded there', async () => {
+    const firstInvoice = await createInvoice({ customer_name: uniqueName('PayFirst'), amount: '100.00', due_date: '2026-12-31' });
+    const other = await createInvoice({ customer_name: uniqueName('PayOther'), amount: '100.00', due_date: '2026-12-31' });
+    const headers = { 'Idempotency-Key': `pay-reused-${Date.now()}-${Math.random()}` };
+    const first = await request('POST', `/invoices/${firstInvoice.body.id}/payments`, { amount: '1.00' }, headers);
+    assert.equal(first.status, 201);
+    const reused = await request('POST', `/invoices/${other.body.id}/payments`, { amount: '1.00' }, headers);
+    assert.equal(reused.status, 409);
+    assert.match(reused.body.error, /already used/);
+    assert.deepEqual(await request('GET', `/invoices/${other.body.id}/payments`), { status: 200, body: [] });
+    await request('DELETE', `/invoices/${firstInvoice.body.id}`);
+    await request('DELETE', `/invoices/${other.body.id}`);
+  });
+
+  await t.test('concurrent payment retries create only one payment', async () => {
+    const fresh = await createInvoice({ customer_name: uniqueName('PayRace'), amount: '100.00', due_date: '2026-12-31' });
+    const headers = { 'Idempotency-Key': `pay-race-${Date.now()}-${Math.random()}` };
+    const results = await Promise.all(
+      Array.from({ length: 5 }, () => request('POST', `/invoices/${fresh.body.id}/payments`, { amount: '5.00' }, headers)),
+    );
+    const ids = results.map((r) => r.body?.id);
+    assert.ok(ids.every((paymentId) => paymentId === ids[0]));
+    assert.equal(results.filter((r) => r.status === 201).length, 1);
+    assert.equal(results.filter((r) => r.status === 200).length, 4);
+    await request('DELETE', `/invoices/${fresh.body.id}`);
+  });
+
+  await t.test('an invalid payment body does not consume the Idempotency-Key', async () => {
+    const fresh = await createInvoice({ customer_name: uniqueName('PayKeyReuse'), amount: '100.00', due_date: '2026-12-31' });
+    const headers = { 'Idempotency-Key': `pay-invalid-${Date.now()}-${Math.random()}` };
+    assert.equal((await request('POST', `/invoices/${fresh.body.id}/payments`, { amount: '0.001' }, headers)).status, 400);
+    const retry = await request('POST', `/invoices/${fresh.body.id}/payments`, { amount: '1.00' }, headers);
+    assert.equal(retry.status, 201);
+    await request('DELETE', `/invoices/${fresh.body.id}`);
   });
 
   await t.test('more than what is left to pay: 422', async () => {

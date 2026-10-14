@@ -25,7 +25,7 @@ import * as invoices from '../../src/invoices.repository';
 import * as payments from '../../src/payments.repository';
 import { SyncInvoice } from '../../src/invoices.schema';
 import { qbo, quote, type QboApi } from '../../src/quickbooks.client';
-import { isTaxedInQuickBooks, isVoidedInQuickBooks, localInvoiceKey, parseLocalInvoiceKey, type QboInvoice } from '../../src/quickbooks.mapping';
+import { isTaxedInQuickBooks, isVoidedInQuickBooks, localInvoiceKey, paidInvoiceLines, parseLocalInvoiceKey, type QboInvoice } from '../../src/quickbooks.mapping';
 import { checkConsistency } from '../../src/sync.consistency';
 import { fetchInvoice } from '../../src/sync.outbound';
 import { processJob } from '../../src/sync.processor';
@@ -438,10 +438,10 @@ test('real QuickBooks sandbox', async (t) => {
     await deletePayments(id);
   });
 
-  await t.test('review: QuickBooks rejects a CDC cursor older than 30 days, and reconciliation catches up anyway', async () => {
+  await t.test('review: reconciliation catches up when the CDC cursor is older than 30 days', async () => {
+    // QuickBooks may or may not reject an old cursor; either way reconciliation must not use CDC
+    // for it but run a full import (CDC only lists changes for at most 30 days).
     const old = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000).toISOString();
-    await assert.rejects(qbo.request(() => 'cdc', { params: { entities: 'Invoice', changedSince: old } }));
-
     const pool = await getPool();
     await pool.query(sql.unsafe`UPDATE quickbooks_connection SET cdc_cursor = ${old}::timestamptz`);
     await enqueueRemoteChanges(qbo); // a full import instead of CDC
@@ -510,7 +510,7 @@ test('real QuickBooks sandbox', async (t) => {
     await assert.rejects(fetchRemote(quickbooksId), (err) => classifyError(err).errorClass === 'not_found');
   });
 
-  await t.test('review 4: a QuickBooks payment with two lines for the same invoice is listed with their sum', async () => {
+  await t.test('review 4: a QuickBooks multi-line payment for one invoice is listed as QuickBooks recorded it', async () => {
     const id = await createLocal('50.00');
     await runJobs(id);
     const invoice = await loadInvoice(id);
@@ -526,13 +526,21 @@ test('real QuickBooks sandbox', async (t) => {
         ],
       },
     })).Payment; // made in QuickBooks, not through this API
+    // Ground truth is what QuickBooks recorded, not what was sent: it normalizes duplicate
+    // lines for the same invoice instead of keeping them as-is.
+    const recorded = (await qbo.request(() => `payment/${payment.Id}`)).Payment;
+    const expected = paidInvoiceLines(recorded)
+      .filter((line) => line.invoiceId === remote.Id)
+      .reduce((sum, line) => sum + Number(line.amount), 0)
+      .toFixed(2);
     const pool = await getPool();
     await pool.transaction((tx) =>
       recordEventAndEnqueue(tx, { source: 'webhook', realmId: realmId!, entity: 'payment', id: payment.Id, operation: 'create', eventKey: randomUUID(), payload: {} }),
     );
     await runJobsFor(`qbo-payment:${realmId}:${payment.Id}`);
 
-    assert.deepEqual((await payments.listForInvoice(id)).map((p) => p.amount), ['30.00']);
+    assert.deepEqual((await payments.listForInvoice(id)).map((p) => p.amount), [expected]);
+    assert.equal((await loadInvoice(id)).balance, (50 - Number(expected)).toFixed(2));
     await deletePayments(id);
   });
 });

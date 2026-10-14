@@ -3,10 +3,12 @@ import { test, after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { sql } from 'slonik';
 import { getPool } from '../src/db';
+import * as invoices from '../src/invoices.repository';
 import { SyncInvoice } from '../src/invoices.schema';
+import * as payments from '../src/payments.repository';
 import { enqueueRemoteChanges } from '../src/sync.reconcile';
 import { invoiceEntityKey } from '../src/sync.repository';
-import { ensureTestConnection, FakeQuickBooks, runJobs, uniqueName } from './helpers';
+import { ensureTestConnection, FakeQuickBooks, loadInvoice, runJobs, uniqueName } from './helpers';
 
 before(ensureTestConnection);
 after(async () => {
@@ -77,6 +79,30 @@ test('a full import instead of CDC also applies deletions made in QuickBooks mea
   await enqueueRemoteChanges(qbo);
   await runJobs([invoiceEntityKey(local.id)], qbo);
   assert.deepEqual((await invoicesOf(realm)).map((i) => i.quickbooks_id), []);
+});
+
+test('offline for more than 30 days: a payment deleted in QuickBooks meanwhile is deleted locally', async () => {
+  const realm = uniqueName('realm').replace(/\W/g, '');
+  const qbo = new FakeQuickBooks(realm);
+  const { invoice } = await invoices.create({ customer_name: uniqueName('Reconnect'), amount: '100.00', currency: 'USD', status: 'sent', due_date: '2026-12-31' });
+  await runJobs([invoiceEntityKey(invoice.id)], qbo);
+  await payments.create(invoice.id, { amount: '30.00' });
+  await runJobs([invoiceEntityKey(invoice.id)], qbo);
+  const [paid] = await payments.listForInvoice(invoice.id);
+
+  // Deleted in QuickBooks while the worker was off: no notification, CDC can't list it anymore
+  await qbo.request(() => 'payment', {
+    method: 'POST',
+    params: { operation: 'delete' },
+    body: { Id: paid.quickbooks_id!, SyncToken: '0' },
+  });
+  const pool = await getPool();
+  await pool.query(sql.unsafe`UPDATE quickbooks_connection SET cdc_cursor = now() - interval '40 days'`);
+
+  await enqueueRemoteChanges(qbo);
+  await runJobs([invoiceEntityKey(invoice.id), `qbo-payment:${realm}:${paid.quickbooks_id}`], qbo);
+  assert.deepEqual(await payments.listForInvoice(invoice.id), []);
+  assert.equal((await loadInvoice(invoice.id)).balance, '100.00');
 });
 
 test('a company without invoices uses CDC, not a full import every time', async () => {
