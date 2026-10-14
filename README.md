@@ -11,9 +11,6 @@ Hand-drawn version: [`docs/system-design.excalidraw`](docs/system-design.excalid
 
 ![Architecture, detailed](docs/architecture.png)
 
-(Source: [`docs/architecture.svg`](docs/architecture.svg). Demo walkthrough, in Spanish: [`docs/guia-video-entrevista.md`](docs/guia-video-entrevista.md), also as PDF;
-`npm run docs:pdf` regenerates the PDF and the PNG after editing the guide or the SVG.)
-
 ```
                         ┌──────────────────────────────┐
   curl / client.http ──►│  API (Express)               │◄──── webhooks ───────┐
@@ -557,7 +554,8 @@ timeouts, stale versions. Failures at exact points are injected with `src/faults
 - ambiguous create: UNKNOWN, no resend, reconciliation found / not found / ambiguous
 - reconciliation: full import when needed, CDC otherwise, and a full import when CDC can't be trusted (cursor
   older than 30 days, or its maximum of 1000 per entity returned) followed by the consistency check, so
-  deletions aren't lost; a company without invoices uses CDC instead of a full import every time
+  deletions aren't lost — including payments deleted in QuickBooks while disconnected; a company without
+  invoices uses CDC instead of a full import every time
 - conflict detection (only local, only remote, same change, concurrent) and resolution
 - races between a local change and a running or waiting job (`test/sync.races.test.ts`): marked paid while
   pushing, a payment synced before a pending QuickBooks edit, deleted or paid while a create was UNKNOWN, voided
@@ -568,9 +566,14 @@ timeouts, stale versions. Failures at exact points are injected with `src/faults
   sent (never sent), a job failed by lease recovery (its notification marked failed), sales tax added by
   QuickBooks (content follows QuickBooks, no endless conflict; taxed invoices read-only here)
 - consistency check: invoice deleted by hand comes back with its payments, deletion missed in QuickBooks
-  applied, not deleted when QuickBooks' list lags but a GET finds it, report-only mode
+  applied, a payment deleted in QuickBooks while disconnected deleted locally (with its invoice balance
+  refreshed), not deleted when QuickBooks' list lags but a GET finds it, report-only mode
 - payments: partial and full, recorded locally or in QuickBooks, over-payment rejected (the limit follows local
-  amount changes and a local `paid`; `0.00` rejected), a concurrent retry with the same key, a key reused on another invoice (`409`), several lines for the same invoice added up, lost payment response
+  amount changes and a local `paid`; `0.00` rejected), idempotency: submitting the same payment five times
+  returns the same stored payment (first `201`, then `200` with the identical body) without queuing twice, a
+  concurrent retry with the same key creates only one row, the same key with a different body still returns the
+  first invoice/payment, an invalid body doesn't consume the key, an overlong key is `400`, a key reused on
+  another invoice (`409`), several lines for the same invoice added up, lost payment response
   reconciled (found / not found) without paying twice, deleted locally (synced, not synced yet, already gone in
   QuickBooks) or in QuickBooks; payments made in QuickBooks listed locally (partial, several invoices, changed,
   deleted, in the full import), our own payments never listed twice; deleted in QuickBooks (row removed, discarded changes recorded) vs voided (kept, marked void,
@@ -590,17 +593,19 @@ database:
   is applied first, and a status-only change vs a QuickBooks edit. For a change made mid-request, the real client
   is wrapped (`withChangeDuring`) to run it right before the request is sent
 - fixes from the second code review: a payment deleted in QuickBooks isn't paid again by a local edit, raising
-  the amount of a paid invoice doesn't pay the difference, and QuickBooks really rejects a CDC cursor older than
-  30 days (the fake only simulates it), after which reconciliation still catches up with a full import. An
-  expired or revoked refresh token isn't tested here: it would break the real connection
+  the amount of a paid invoice doesn't pay the difference, and reconciliation catches up with a full import
+  when the CDC cursor is older than 30 days (whatever QuickBooks itself answers for the old cursor).
+  An expired or revoked refresh token isn't tested here: it would break the real connection
 - the SyncToken only from our own write: an edit made in QuickBooks right between our payment and the read that
   follows it is still applied locally
 - fixes from the fourth code review: a sample invoice with sales tax is recognized from its real `TxnTaxDetail`
   (only read, the sample data isn't changed) and its local copy rejects content edits (`409`); a payment
   recorded and then its invoice deleted leaves the invoice deleted in QuickBooks, not voided, with no payment;
-  a payment made in QuickBooks with two lines for the same invoice is listed with their sum
+  a payment made in QuickBooks with several lines for one invoice is listed as QuickBooks recorded it
+  (it normalizes duplicate lines instead of keeping them as sent)
 
-It needs `/quickbooks/connect` done and **no worker running** (the tests process their own jobs). It uses a
+It needs `/quickbooks/connect` done and **no worker running** (the tests process their own jobs — a running
+worker steals them and the tests fail with "No job to run"). It uses a
 dedicated customer (`Sync Sandbox Test Customer`) and deletes the invoices it creates, and their payments first
 (so they're deleted, not voided); the sandbox's sample data isn't touched. The consistency check compares the
 whole company, so if it differs from the main database in something else, those repairs are queued too.
